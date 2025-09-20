@@ -3,5 +3,5 @@ pandas==2.2.2
 beautifulsoup4==4.12.3
 selenium==4.20.0
 webdriver-manager==4.0.1
-lxml==5.2.2
+lxml
 numpy==1.26.4
