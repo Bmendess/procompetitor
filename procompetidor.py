@@ -47,19 +47,31 @@ def sanitize_data(df):
 # --- Função de Scraping (sem alterações) ---
 @st.cache_data(show_spinner=True, ttl=3600)
 def perform_scraping(url):
+    """
+    Realiza o scraping do título do evento e dos dados de atletas,
+    configurado para rodar no Streamlit Community Cloud.
+    """
+    # --- CONFIGURAÇÃO DO SELENIUM PARA DEPLOY ---
+    # As opções do Chrome são essenciais para rodar em um container Linux sem interface gráfica
     options = webdriver.ChromeOptions()
-    options.add_argument('--headless')
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-    options.add_argument('--disable-gpu')
-    
-    try:
-        service = Service(ChromeDriverManager().install())
-    except Exception as e:
-        st.error(f"Erro ao inicializar ChromeDriverManager: {e}.")
-        return None, None
+    options.add_argument("--headless")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080") # Definir um tamanho de janela pode ajudar
 
-    driver = webdriver.Chrome(service=service, options=options)
+    # Não usamos mais o webdriver_manager. O Service() vazio fará com que o Selenium
+    # procure pelo chromedriver instalado pelo packages.txt no sistema.
+    service = Service()
+    # -------------------------------------------
+
+    try:
+        driver = webdriver.Chrome(service=service, options=options)
+    except Exception as e:
+        st.error(f"Erro ao inicializar o WebDriver: {e}")
+        st.error("Isso pode ocorrer se as dependências do sistema não foram instaladas corretamente. Verifique o arquivo packages.txt.")
+        return None, "Erro de Inicialização"
+
     st.write(f"Iniciando raspagem de dados de: {url}")
     
     championship_title = "Análise de Inscritos"
@@ -145,7 +157,9 @@ def perform_scraping(url):
         st.error(f"Ocorreu um erro crítico durante a raspagem de dados: {e}")
         return None, championship_title
     finally:
-        driver.quit()
+        # Garante que o driver seja fechado mesmo se ocorrerem erros
+        if 'driver' in locals() and driver:
+            driver.quit()
 
 # --- Interface Streamlit ---
 st.set_page_config(layout="wide", page_title="Extractor de Atletas ProCompetidor")
