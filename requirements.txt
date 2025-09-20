@@ -1,7 +1,7 @@
-streamlit==1.35.0
-pandas==2.2.2
-beautifulsoup4==4.12.3
-selenium==4.20.0
-webdriver-manager==4.0.1
+streamlit
+pandas
+beautifulsoup4
+selenium
+webdriver-manager
 lxml
-numpy==1.26.4
+numpy
