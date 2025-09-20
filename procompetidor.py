@@ -4,13 +4,13 @@ from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options  # Importando Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
 import time
 import re
 import unicodedata
-import numpy as np # Importa a biblioteca numpy
+import numpy as np
 
 # --- Função para remover acentos (sem alterações) ---
 def remove_accents(input_str):
@@ -41,19 +41,18 @@ def sanitize_data(df):
             series = series.str.replace(r'\s+', ' ', regex=True)
             series = series.str.strip()
             df[col] = series
-        
+            
     return df
 
-# --- Função de Scraping (sem alterações) ---
-
+# --- Função de Scraping (COM AJUSTES) ---
 @st.cache_data(show_spinner=True, ttl=3600)
 def perform_scraping(url):
     """
     Realiza o scraping do título do evento e dos dados de atletas,
-    usando webdriver-manager para maior compatibilidade no deploy.
+    usando a inicialização moderna do Selenium 4.
     """
-    # --- CONFIGURAÇÃO DO SELENIUM COM WEBDRIVER-MANAGER ---
-    options = webdriver.ChromeOptions()
+    # --- CONFIGURAÇÃO DO SELENIUM 4 (MODO MODERNO) ---
+    options = Options()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
@@ -61,9 +60,11 @@ def perform_scraping(url):
     options.add_argument("--window-size=1920,1080")
 
     try:
-        # Usando o webdriver-manager para instalar o driver
-        service = Service(ChromeDriverManager().install())
+        # O Selenium Manager (parte do Selenium 4+) gerencia o driver automaticamente.
+        # Não é mais necessário usar o webdriver-manager.
+        service = Service()
         driver = webdriver.Chrome(service=service, options=options)
+        
     except Exception as e:
         st.error(f"Erro ao inicializar o WebDriver: {e}")
         st.error("Isso pode ocorrer se as dependências do sistema (packages.txt) ou do Python (requirements.txt) estiverem incorretas.")
@@ -159,7 +160,7 @@ def perform_scraping(url):
         if 'driver' in locals() and driver:
             driver.quit()
 
-# --- Interface Streamlit ---
+# --- Interface Streamlit (sem alterações) ---
 st.set_page_config(layout="wide", page_title="Extractor de Atletas ProCompetidor")
 st.title("💪 Extrator de Atletas ProCompetidor")
 st.markdown("Esta ferramenta extrai a lista de atletas de uma página de checagem do site ProCompetidor. Insira a URL abaixo e clique em 'Extrair Dados'.")
