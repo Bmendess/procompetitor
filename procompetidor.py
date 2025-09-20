@@ -61,7 +61,7 @@ def perform_scraping(url):
     options.add_argument("--window-size=1920,1080")
 
     try:
-        # Voltamos a usar o webdriver-manager para instalar o driver
+        # Usando o webdriver-manager para instalar o driver
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
     except Exception as e:
