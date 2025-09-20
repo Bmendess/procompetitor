@@ -45,32 +45,30 @@ def sanitize_data(df):
     return df
 
 # --- Função de Scraping (sem alterações) ---
+
 @st.cache_data(show_spinner=True, ttl=3600)
 def perform_scraping(url):
     """
     Realiza o scraping do título do evento e dos dados de atletas,
-    configurado para rodar no Streamlit Community Cloud.
+    usando webdriver-manager para maior compatibilidade no deploy.
     """
-    # --- CONFIGURAÇÃO DO SELENIUM PARA DEPLOY ---
-    # As opções do Chrome são essenciais para rodar em um container Linux sem interface gráfica
+    # --- CONFIGURAÇÃO DO SELENIUM COM WEBDRIVER-MANAGER ---
     options = webdriver.ChromeOptions()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080") # Definir um tamanho de janela pode ajudar
-
-    # Não usamos mais o webdriver_manager. O Service() vazio fará com que o Selenium
-    # procure pelo chromedriver instalado pelo packages.txt no sistema.
-    service = Service()
-    # -------------------------------------------
+    options.add_argument("--window-size=1920,1080")
 
     try:
+        # Voltamos a usar o webdriver-manager para instalar o driver
+        service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
     except Exception as e:
         st.error(f"Erro ao inicializar o WebDriver: {e}")
-        st.error("Isso pode ocorrer se as dependências do sistema não foram instaladas corretamente. Verifique o arquivo packages.txt.")
+        st.error("Isso pode ocorrer se as dependências do sistema (packages.txt) ou do Python (requirements.txt) estiverem incorretas.")
         return None, "Erro de Inicialização"
+    # --------------------------------------------------------
 
     st.write(f"Iniciando raspagem de dados de: {url}")
     
