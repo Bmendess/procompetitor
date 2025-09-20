@@ -4,3 +4,4 @@ beautifulsoup4
 selenium
 lxml
 numpy
+webdriver-manager
