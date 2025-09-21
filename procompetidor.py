@@ -4,6 +4,8 @@ import numpy as np
 import plotly.express as px
 from selenium import webdriver
 from selenium.webdriver.common.by import By
+from webdriver_manager.chrome import ChromeDriverManager
+from webdriver_manager.core.os_manager import ChromeType
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
@@ -19,16 +21,20 @@ st.set_page_config(
 
 # --- Função de Extração e Limpeza de Dados ---
 def raspar_dados(url, progress_bar, status_text):
-    """
-    Função ajustada para rodar em ambiente de deploy (Hugging Face),
-    apontando diretamente para o driver do sistema.
-    """
-    # --- Configuração do Selenium para ambiente de produção (Hugging Face) ---
     chrome_options = Options()
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--disable-features=NetworkService")
+    chrome_options.add_argument("--window-size=1920x1080")
+    chrome_options.add_argument("--disable-features=VizDisplayCompositor")
+    
+    # Para Streamlit Cloud
+    driver = webdriver.Chrome(
+        service=Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install()),
+        options=chrome_options
+    )
 
     # --- LINHA MAIS IMPORTANTE PARA O DEPLOY ---
     # Aponta diretamente para o chromedriver instalado via packages.txt
@@ -196,3 +202,4 @@ if st.button("Analisar Competição", type="primary"):
 
     else:
         st.warning("Nenhum dado foi encontrado. A URL pode estar inativa ou a estrutura do site mudou.")
+
