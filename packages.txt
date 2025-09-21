@@ -10,3 +10,5 @@ libatk1.0-0
 libcairo-gobject2
 libgtk-3-0
 libgdk-pixbuf-xlib-2.0-0
+chromium
+chromium-driver
