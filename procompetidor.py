@@ -1,261 +1,198 @@
 import streamlit as st
 import pandas as pd
-from bs4 import BeautifulSoup
+import numpy as np
+import plotly.express as px
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options  # Importando Options
+from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import time
-import re
-import unicodedata
-import numpy as np
 
-# --- Função para remover acentos (sem alterações) ---
-def remove_accents(input_str):
-    if not isinstance(input_str, str):
-        return input_str
-    nfkd_form = unicodedata.normalize('NFKD', input_str)
-    return "".join([c for c in nfkd_form if not unicodedata.combining(c)])
+# --- Configuração da Página do Streamlit ---
+st.set_page_config(
+    page_title="Dashboard ProCompetidor",
+    page_icon="📊",
+    layout="wide"
+)
 
-# --- Função de Sanitização (sem alterações) ---
-def sanitize_data(df):
-    text_columns = ['faixa', 'genero', 'equipe', 'professor', 'categoria_de_idade', 'categoria_de_peso']
-
-    for col in text_columns:
-        if col in df.columns and not df[col].empty:
-            series = df[col].astype(str)
-            if col == 'categoria_de_peso':
-                series = series.str.replace(r'\s*\([^)]*\)', '', regex=True)
-                series = series.str.replace(' - ', '/', regex=False)
-            if col == 'categoria_de_idade':
-                series = series.str.replace(r'\s*\([^)]*\)', '', regex=True)
-            if col == 'faixa':
-                series = series.str.replace('+', ' E ', regex=False)
-                series = series.str.replace('/', ' E ', regex=False)
-                series = series.replace({"MARON": "MARROM"})
-
-            series = series.apply(remove_accents)
-            series = series.str.upper()
-            series = series.str.replace(r'\s+', ' ', regex=True)
-            series = series.str.strip()
-            df[col] = series
-            
-    return df
-
-# --- Função de Scraping (COM AJUSTES) ---
-@st.cache_data(show_spinner=True, ttl=3600)
-def perform_scraping(url):
+# --- Função de Extração e Limpeza de Dados ---
+def raspar_dados(url, progress_bar, status_text):
     """
-    Realiza o scraping do título do evento e dos dados de atletas,
-    usando a inicialização moderna do Selenium 4.
+    Função ajustada para rodar em ambiente de deploy (Hugging Face),
+    apontando diretamente para o driver do sistema.
     """
-    # --- CONFIGURAÇÃO DO SELENIUM 4 (MODO MODERNO) ---
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")
+    # --- Configuração do Selenium para ambiente de produção (Hugging Face) ---
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--window-size=1920,1080")
 
-    try:
-        # O Selenium Manager (parte do Selenium 4+) gerencia o driver automaticamente.
-        # Não é mais necessário usar o webdriver-manager.
-        service = Service()
-        driver = webdriver.Chrome(service=service, options=options)
-        
-    except Exception as e:
-        st.error(f"Erro ao inicializar o WebDriver: {e}")
-        st.error("Isso pode ocorrer se as dependências do sistema (packages.txt) ou do Python (requirements.txt) estiverem incorretas.")
-        return None, "Erro de Inicialização"
-    # --------------------------------------------------------
-
-    st.write(f"Iniciando raspagem de dados de: {url}")
+    # --- LINHA MAIS IMPORTANTE PARA O DEPLOY ---
+    # Aponta diretamente para o chromedriver instalado via packages.txt
+    service = Service(executable_path="/usr/bin/chromedriver")
+    driver = webdriver.Chrome(service=service, options=chrome_options) 
+    # ----------------------------------------------
     
-    championship_title = "Análise de Inscritos"
+    competition_title = "Competição" # Título padrão
     
     try:
         driver.get(url)
+        wait = WebDriverWait(driver, 30)
+        
+        status_text.text("Carregando a página e buscando informações...")
         
         try:
-            title_xpath = "//*[@id='root']/div/div/div/div[1]/div/div/div[1]/h1"
-            wait = WebDriverWait(driver, 10)
-            title_element = wait.until(EC.visibility_of_element_located((By.XPATH, title_xpath)))
-            full_title = title_element.text
-            championship_title = full_title.replace("CHECAGEM", "").strip()
-            st.success(f"Título do evento encontrado: {championship_title}")
-        except Exception as e:
-            st.warning(f"Não foi possível capturar o título do evento. Usando título padrão. Erro: {e}")
+            title_element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "h4.MuiTypography-root")))
+            competition_title = title_element.text
+        except Exception:
+            status_text.text("Título da competição não encontrado, usando título padrão.")
+            pass
 
-        button_xpath = """//*[@id="ratings-widget-25"]/div/div[4]/div"""
-        wait = WebDriverWait(driver, 30)
-        load_list_button = wait.until(EC.element_to_be_clickable((By.XPATH, button_xpath)))
-        load_list_button.click()
-        st.write("Botão 'Ver Lista de Inscritos' clicado. Aguardando carregamento...")
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".MuiAccordion-root")))
+        
+        accordions = driver.find_elements(By.CSS_SELECTOR, ".MuiAccordion-root")
+        total_accordions = len(accordions)
+        lista_de_inscritos = []
 
-        card_class_name = "ticket-style-1"
-        wait.until(EC.presence_of_element_located((By.CLASS_NAME, card_class_name)))
-        time.sleep(3)
-
-        html_content = driver.page_source
-        soup = BeautifulSoup(html_content, 'lxml')
-        athlete_cards = soup.find_all('div', class_=card_class_name)
-        st.success(f"Dados raspados com sucesso! Encontrados {len(athlete_cards)} atletas.")
-
-        lista_de_atletas = []
-
-        for card in athlete_cards:
-            dados_atleta = {}
+        for i, accordion in enumerate(accordions):
+            progress = (i + 1) / total_accordions
+            status_text.text(f"Processando categoria {i + 1} de {total_accordions}...")
+            progress_bar.progress(progress)
+            
             try:
-                h3_tag = card.find('h3')
-                if not h3_tag: continue
-                nome_bruto = h3_tag.get_text(separator=' ').strip()
-                nome_limpo = re.sub(r'Somente Peso|Categoria Peso e Absoluto', '', nome_bruto, flags=re.IGNORECASE)
-                dados_atleta['nome'] = " ".join(nome_limpo.split())
-                info_divs = card.find_all('div', class_='ticket-info')
-                if info_divs and any(div.find('strong') for div in info_divs):
-                    for info in info_divs:
-                        strong_tag = info.find('strong')
-                        if strong_tag:
-                            chave = strong_tag.text.strip().replace(':', ''); valor = strong_tag.next_sibling.strip() if strong_tag.next_sibling else ""
-                            if 'Idade' in chave: dados_atleta['categoria_de_idade'] = valor
-                            elif 'Faixa' in chave: dados_atleta['faixa'] = valor
-                            elif 'Peso' in chave: dados_atleta['categoria_de_peso'] = valor
-                            elif 'Gênero' in chave: dados_atleta['genero'] = valor
-                            elif 'Equipe' in chave: dados_atleta['equipe'] = valor
-                            elif 'Professor' in chave: dados_atleta['professor'] = valor
-                else:
-                    p_tag = card.find('p')
-                    if p_tag:
-                        linhas_brutas = str(p_tag).split('<br/>'); linhas = [BeautifulSoup(linha, "lxml").get_text().strip() for linha in linhas_brutas]
-                        if len(linhas) >= 3:
-                            dados_atleta['categoria_de_idade'] = linhas[0]
-                            partes = [p.strip() for p in linhas[1].split('/')]
-                            if len(partes) >= 2:
-                                dados_atleta['faixa'] = partes[0]; dados_atleta['genero'] = partes[-1]; dados_atleta['categoria_de_peso'] = "/".join(partes[1:-1]).strip()
-                            partes_linha_2 = [p.strip() for p in linhas[2].split('/')]
-                            if len(partes_linha_2) >= 2:
-                                dados_atleta['equipe'] = partes_linha_2[0]; dados_atleta['professor'] = partes_linha_2[1]
-                lista_de_atletas.append(dados_atleta)
-            except Exception as e:
-                st.warning(f"Erro ao processar um card: {e}")
+                summary_header = accordion.find_element(By.CSS_SELECTOR, ".MuiAccordionSummary-root")
+                titulo_raw = summary_header.find_element(By.CSS_SELECTOR, ".MuiTypography-root").text
+            except Exception: 
+                continue
 
-        df = pd.DataFrame(lista_de_atletas)
-        colunas_ordenadas = ['nome', 'categoria_de_idade', 'faixa', 'categoria_de_peso', 'genero', 'equipe', 'professor']
-        
-        for col in colunas_ordenadas:
-            if col not in df.columns: df[col] = pd.NA
-        df = df[colunas_ordenadas]
-        
-        df = sanitize_data(df)
-        
-        return df, championship_title
+            partes_titulo = [p.strip() for p in titulo_raw.split(',')]
+            if len(partes_titulo) >= 4:
+                categoria_idade, faixa, categoria_peso, genero = partes_titulo[0], partes_titulo[1], partes_titulo[2], partes_titulo[3].split(' - ')[0].strip()
+            elif len(partes_titulo) == 3:
+                categoria_idade, faixa, genero_raw = partes_titulo[0], partes_titulo[1], partes_titulo[2]
+                genero, categoria_peso = genero_raw.split(' - ')[0].strip(), "N/A"
+            else: 
+                continue
 
-    except Exception as e:
-        st.error(f"Ocorreu um erro crítico durante a raspagem de dados: {e}")
-        return None, championship_title
+            try: 
+                driver.execute_script("arguments[0].click();", summary_header)
+                time.sleep(0.5)
+            except Exception: 
+                continue
+
+            cards_inscritos = accordion.find_elements(By.CSS_SELECTOR, ".MuiBox-root.css-g32t2d")
+            for card in cards_inscritos:
+                try:
+                    nome = card.find_element(By.TAG_NAME, "h6").text
+                    infos = card.find_elements(By.TAG_NAME, "p")
+                    equipe = infos[0].text.replace("Equipe: ", "").strip()
+                    professor = infos[1].text.replace("Professor(a): ", "").strip() if len(infos) > 1 else "N/A"
+                    inscrito = {"Nome": nome, "Equipe": equipe, "Professor": professor, "Categoria de Idade": categoria_idade, "Faixa": faixa, "Categoria de Peso": categoria_peso, "Gênero": genero}
+                    lista_de_inscritos.append(inscrito)
+                except Exception: 
+                    continue
+        
+        if not lista_de_inscritos: 
+            return pd.DataFrame(), competition_title
+
+        status_text.text("Finalizando extração. Limpando e organizando os dados...")
+        df = pd.DataFrame(lista_de_inscritos)
+
+        df['Faixa'] = df['Faixa'].str.replace('+', 'E', regex=False)
+        df['Categoria de Peso'] = df['Categoria de Peso'].str.replace(' - ', '/', regex=False)
+        df['Categoria de Idade'] = df['Categoria de Idade'].str.replace(r'\s*\(.*\)', '', regex=True).str.strip()
+        df['Categoria de Peso'] = df['Categoria de Peso'].str.replace(r'\s*\(.*\)', '', regex=True).str.strip()
+        
+        for column in df.select_dtypes(include=['object']).columns:
+            df[column] = df[column].str.normalize('NFD').str.encode('ascii', 'ignore').str.decode('utf-8').str.upper()
+        
+        ordem_final = ["Nome", "Categoria de Idade", "Faixa", "Categoria de Peso", "Gênero", "Equipe", "Professor"]
+        df = df[ordem_final]
+        
+        return df, competition_title
+    
     finally:
-        # Garante que o driver seja fechado mesmo se ocorrerem erros
-        if 'driver' in locals() and driver:
-            driver.quit()
+        driver.quit()
 
-# --- Interface Streamlit (sem alterações) ---
-st.set_page_config(layout="wide", page_title="Extractor de Atletas ProCompetidor")
-st.title("💪 Extrator de Atletas ProCompetidor")
-st.markdown("Esta ferramenta extrai a lista de atletas de uma página de checagem do site ProCompetidor. Insira a URL abaixo e clique em 'Extrair Dados'.")
+# --- Interface Principal do Streamlit (UI) ---
+st.title("🥋 Dashboard de Análise ProCompetidor")
+st.markdown("Insira a URL de uma página de checagem para extrair, limpar e visualizar os dados dos inscritos.")
 
-default_url = "https://procompetidor.com.br/checagem/UNpYfAt1jAPYxUTcuhgD"
-url_input = st.text_input("URL da página de checagem:", default_url)
+url = st.text_input("URL da página de checagem", "https://procompetidor.com.br/checagem/UNpYfAt1jAPYxUTcuhgD")
 
-if st.button("Extrair Dados"):
-    if url_input:
-        df_atletas, title = perform_scraping(url_input)
+if st.button("Analisar Competição", type="primary"):
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    df, title = raspar_dados(url, progress_bar, status_text)
+    
+    status_text.empty()
+    progress_bar.empty()
+    
+    if not df.empty:
+        # Define o título principal da página com o nome do evento
+        st.header(f"Resultados para: {title}", divider='orange')
+
+        # Apresenta as métricas principais (KPIs)
+        total_atletas = len(df)
+        total_equipes = df['Equipe'].nunique()
+        genero_counts = df['Gênero'].value_counts()
         
-        if title:
-            st.title(f"📊 Análise de Inscritos: {title}")
-        
-        if df_atletas is not None and not df_atletas.empty:
-            st.subheader("Dados dos Atletas Extraídos e Padronizados")
-            st.dataframe(df_atletas, use_container_width=True)
+        kpi1, kpi2, kpi3 = st.columns(3)
+        kpi1.metric(label="Total de Atletas 👥", value=total_atletas)
+        kpi2.metric(label="Total de Equipes 🛡️", value=total_equipes)
+        kpi3.metric(label="Masculino / Feminino ♂️♀️", value=f"{genero_counts.get('MASCULINO', 0)} / {genero_counts.get('FEMININO', 0)}")
+
+        # Organiza o conteúdo principal em abas
+        tab1, tab2 = st.tabs(["📊 Análise Gráfica", "📋 Tabela de Dados Completa"])
+
+        with tab2:
+            st.subheader(f"Tabela de Competidores Corrigida - {title}")
+            st.dataframe(df)
+            csv = df.to_csv(index=False).encode('utf-8')
+            st.download_button(label="Baixar dados como CSV", data=csv, file_name=f'inscritos_{title}.csv', mime='text/csv')
+
+        with tab1:
+            # Prepara os dados para os gráficos
+            conditions = [df['Categoria de Idade'].str.contains('MASTER'), df['Categoria de Idade'].str.contains('ADULTO')]
+            choices = ['MASTERS', 'ADULTO']
+            df['Grupo Etário'] = np.select(conditions, choices, default='KIDS')
+            gender_colors = {'MASCULINO': '#1f77b4', 'FEMININO': '#e377c2'}
+
+            # Função auxiliar para criar gráficos de barras
+            def create_bar_chart(data_frame, group_by_col, title):
+                grouped_data = data_frame.groupby([group_by_col, 'Gênero']).size().reset_index(name='Contagem')
+                fig = px.bar(grouped_data, x=group_by_col, y='Contagem', color='Gênero', title=title, labels={'Contagem': 'Número de Atletas', group_by_col: title.split(' por ')[-1]}, color_discrete_map=gender_colors, text_auto=True)
+                fig.update_xaxes(categoryorder='total descending', tickangle=-45)
+                st.plotly_chart(fig, use_container_width=True)
+
+            # Gera os gráficos principais
+            col1, col2 = st.columns(2)
+            with col1: 
+                create_bar_chart(df, 'Grupo Etário', 'Atletas por Grupo Etário')
+            with col2: 
+                create_bar_chart(df, 'Categoria de Idade', 'Atletas por Categoria de Idade')
             
-            csv = df_atletas.to_csv(index=False).encode('utf-8-sig')
-            st.download_button("Baixar dados como CSV", csv, "atletas_procompetidor.csv", "text/csv")
+            create_bar_chart(df, 'Faixa', 'Atletas por Faixa')
+            create_bar_chart(df, 'Categoria de Peso', 'Atletas por Categoria de Peso')
             
-            st.divider()
-            st.header("📊 Análise Visual dos Dados")
+            st.subheader("🏆 Análise de Equipes e Professores", divider='orange')
             
-            try:
-                if 'genero' in df_atletas.columns and not df_atletas['genero'].dropna().empty:
-                    color_map = {"FEMININO": "#FF69B4", "MASCULINO": "#1E90FF"}
-                    
-                    # --- NOVA LÓGICA: Cria a coluna 'grupo_etario' para o novo gráfico ---
-                    conditions = [
-                        df_atletas['categoria_de_idade'].str.contains('MASTER'),
-                        df_atletas['categoria_de_idade'].str.contains('ADULTO')
-                    ]
-                    choices = ['MASTERS', 'ADULTOS']
-                    df_atletas['grupo_etario'] = np.select(conditions, choices, default='KIDS')
-                    # ----------------------------------------------------------------------
+            # Função auxiliar para criar gráficos de Top 10
+            def create_top10_chart(data_frame, group_by_col, title):
+                top_10_list = data_frame[group_by_col].value_counts().nlargest(10).index
+                df_top10 = data_frame[data_frame[group_by_col].isin(top_10_list)]
+                create_bar_chart(df_top10, group_by_col, title)
+            
+            # Gera os gráficos de Top 10
+            col3, col4 = st.columns(2)
+            with col3: 
+                create_top10_chart(df, 'Equipe', 'Top 10 Equipes com Mais Atletas')
+            with col4: 
+                create_top10_chart(df, 'Professor', 'Top 10 Professores com Mais Atletas')
 
-                    # --- NOVO GRÁFICO: Divisão Geral por Grupo Etário ---
-                    st.subheader("Visão Geral: Divisão por Grupo Etário")
-                    grupo_etario_counts = df_atletas.groupby(['grupo_etario', 'genero']).size().unstack(fill_value=0)
-                    colors = [color_map.get(col, "#808080") for col in grupo_etario_counts.columns]
-                    st.bar_chart(grupo_etario_counts, use_container_width=True, color=colors)
-                    # -----------------------------------------------------
-
-                    st.divider() # Adiciona uma linha divisória para separar a visão geral dos detalhes
-
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.subheader("Atletas por Categoria de Idade (Detalhado)")
-                        idade_gender_counts = df_atletas.groupby(['categoria_de_idade', 'genero']).size().unstack(fill_value=0)
-                        idade_gender_counts['total'] = idade_gender_counts.sum(axis=1)
-                        idade_gender_counts = idade_gender_counts.sort_values('total', ascending=False).drop(columns='total')
-                        colors = [color_map.get(col, "#808080") for col in idade_gender_counts.columns]
-                        st.bar_chart(idade_gender_counts, use_container_width=True, color=colors)
-                        
-                    with col2:
-                        st.subheader("Atletas por Faixa")
-                        faixa_gender_counts = df_atletas.groupby(['faixa', 'genero']).size().unstack(fill_value=0)
-                        faixa_gender_counts['total'] = faixa_gender_counts.sum(axis=1)
-                        faixa_gender_counts = faixa_gender_counts.sort_values('total', ascending=False).drop(columns='total')
-                        colors = [color_map.get(col, "#808080") for col in faixa_gender_counts.columns]
-                        st.bar_chart(faixa_gender_counts, use_container_width=True, color=colors)
-
-                    st.subheader("Atletas por Categoria de Peso")
-                    peso_gender_counts = df_atletas.groupby(['categoria_de_peso', 'genero']).size().unstack(fill_value=0)
-                    peso_gender_counts['total'] = peso_gender_counts.sum(axis=1)
-                    peso_gender_counts = peso_gender_counts.sort_values('total', ascending=False).drop(columns='total')
-                    colors = [color_map.get(col, "#808080") for col in peso_gender_counts.columns]
-                    st.bar_chart(peso_gender_counts, use_container_width=True, color=colors)
-                    
-                    st.subheader("Top 15 Equipes com Mais Atletas")
-                    equipe_gender_counts = df_atletas.groupby(['equipe', 'genero']).size().unstack(fill_value=0)
-                    equipe_gender_counts['total'] = equipe_gender_counts.sum(axis=1)
-                    top_equipes = equipe_gender_counts.sort_values('total', ascending=False).head(15).drop(columns='total')
-                    colors = [color_map.get(col, "#808080") for col in top_equipes.columns]
-                    st.bar_chart(top_equipes, use_container_width=True, color=colors)
-
-                    st.subheader("Top 15 Professores com Mais Atletas")
-                    prof_gender_counts = df_atletas.groupby(['professor', 'genero']).size().unstack(fill_value=0)
-                    prof_gender_counts['total'] = prof_gender_counts.sum(axis=1)
-                    top_prof = prof_gender_counts.sort_values('total', ascending=False).head(15).drop(columns='total')
-                    colors = [color_map.get(col, "#808080") for col in top_prof.columns]
-                    st.bar_chart(top_prof, use_container_width=True, color=colors)
-
-                else:
-                    st.warning("Não foi possível gerar gráficos por gênero pois a coluna 'genero' está vazia ou ausente.")
-            except Exception as e:
-                st.error(f"Ocorreu um erro ao gerar os gráficos: {e}")
-
-        elif df_atletas is not None and df_atletas.empty:
-            st.warning("Nenhum atleta foi encontrado na página.")
-        else:
-            st.error("Não foi possível extrair os dados.")
     else:
-        st.warning("Por favor, insira uma URL para continuar.")
-
-st.markdown("---")
-st.markdown("Desenvolvido com ❤️ e Python.")
+        st.warning("Nenhum dado foi encontrado. A URL pode estar inativa ou a estrutura do site mudou.")
