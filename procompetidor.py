@@ -1,205 +1,733 @@
 import streamlit as st
+import random
+import math
 import pandas as pd
-import numpy as np
-import plotly.express as px
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from webdriver_manager.chrome import ChromeDriverManager
-from webdriver_manager.core.os_manager import ChromeType
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-import time
+import requests
+from io import StringIO
+from typing import List, Optional, Dict
+import unicodedata
 
-# --- Configuração da Página do Streamlit ---
-st.set_page_config(
-    page_title="Dashboard ProCompetidor",
-    page_icon="📊",
-    layout="wide"
-)
+st.set_page_config(page_title="Sistema de Chaves IBJJF", layout="wide", initial_sidebar_state="expanded")
 
-# --- Função de Extração e Limpeza de Dados ---
-def raspar_dados(url, progress_bar, status_text):
-    chrome_options = Options()
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--disable-features=NetworkService")
-    chrome_options.add_argument("--window-size=1920x1080")
-    chrome_options.add_argument("--disable-features=VizDisplayCompositor")
-    
-    # Para Streamlit Cloud
-    driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install()),
-        options=chrome_options
-    )
 
-    # --- LINHA MAIS IMPORTANTE PARA O DEPLOY ---
-    # Aponta diretamente para o chromedriver instalado via packages.txt
-    service = Service(executable_path="/usr/bin/chromedriver")
-    driver = webdriver.Chrome(service=service, options=chrome_options) 
-    # ----------------------------------------------
-    
-    competition_title = "Competição" # Título padrão
-    
+def sanitizar_string(texto: str) -> str:
+    """
+    Remove acentos, converte para maiúsculas e remove espaços extras.
+    """
+    if not isinstance(texto, str):
+        return ""
+    texto_normalizado = unicodedata.normalize('NFD', texto)
+    texto_sem_acentos = "".join(c for c in texto_normalizado if unicodedata.category(c) != 'Mn')
+    return texto_sem_acentos.upper().strip()
+
+
+# --- Classes de Dados ---
+class Atleta:
+    def __init__(self, nome: str, equipe: str, seed: int = 0, categoria_idade: str = "", categoria_peso: str = "", faixa: str = "", genero: str = ""):
+        self.nome = nome
+        self.equipe = equipe
+        self.seed = seed
+        self.categoria_idade = categoria_idade
+        self.categoria_peso = categoria_peso
+        self.faixa = faixa
+        self.genero = genero
+
+class Luta:
+    def __init__(self, atleta1: Optional[Atleta] = None, atleta2: Optional[Atleta] = None):
+        self.atleta1 = atleta1
+        self.atleta2 = atleta2
+        self.vencedor: Optional[Atleta] = None
+        self.numero: int = 0
+
+    def processar(self) -> Optional[Atleta]:
+        if self.atleta1 and not self.atleta2: 
+            self.vencedor = self.atleta1
+        elif self.atleta2 and not self.atleta1: 
+            self.vencedor = self.atleta2
+        return self.vencedor
+
+# --- Lógica de Chaveamento ---
+class ChaveamentoProfissional:
+    def __init__(self, atletas: List[Atleta], categoria: str):
+        self.atletas = atletas
+        self.categoria = categoria
+        self.rodadas: List[List[Luta]] = []
+        self.medalhistas: Dict = {}
+        self.nomes_rodadas: List[str] = []
+
+        if len(atletas) > 1:
+            self._construir_chave_parcial()
+
+    def _distribuir_por_equipe(self, atletas: List[Atleta], posicoes: List[int], tamanho_chave: int) -> List[tuple]:
+            """
+            Distribui atletas evitando que mesma equipe se enfrente antes da final/semifinal
+            """
+            # Agrupa atletas por equipe
+            equipes = {}
+            for atleta in atletas:
+                if atleta.equipe not in equipes:
+                    equipes[atleta.equipe] = []
+                equipes[atleta.equipe].append(atleta)
+            
+            # Define quadrantes baseado no tamanho da chave
+            num_quadrantes = min(4, tamanho_chave // 4) if tamanho_chave >= 8 else 2
+            tamanho_quadrante = len(posicoes) // num_quadrantes
+            
+            quadrantes = []
+            for i in range(num_quadrantes):
+                inicio = i * tamanho_quadrante
+                fim = inicio + tamanho_quadrante if i < num_quadrantes - 1 else len(posicoes)
+                quadrantes.append(posicoes[inicio:fim])
+            
+            print(f"DEBUG: Distribuindo {len(atletas)} atletas em {num_quadrantes} quadrantes")
+            
+            # Distribui atletas da mesma equipe em quadrantes diferentes
+            resultado = []
+            quadrante_atual = 0
+            
+            for equipe, atletas_equipe in equipes.items():
+                if len(atletas_equipe) > 1:
+                    print(f"DEBUG: Equipe '{equipe}' tem {len(atletas_equipe)} atletas - separando")
+                
+                for atleta in atletas_equipe:
+                    # Encontra posição disponível no quadrante atual
+                    if quadrantes[quadrante_atual]:
+                        pos = quadrantes[quadrante_atual].pop(0)
+                        resultado.append((atleta, pos))
+                        print(f"DEBUG: {atleta.nome} ({equipe}) -> quadrante {quadrante_atual + 1}, posição {pos}")
+                    
+                    # Muda para próximo quadrante se há múltiplos atletas da mesma equipe
+                    if len(atletas_equipe) > 1:
+                        quadrante_atual = (quadrante_atual + 1) % num_quadrantes
+            
+            return resultado
+
+    def _construir_chave_parcial(self):
+        n = len(self.atletas)
+        if n == 0: return
+
+        # Ordena atletas por seed (melhores primeiro)
+        atletas_ordenados = sorted(self.atletas, key=lambda x: x.seed if x.seed > 0 else 999)
+        
+        # Calcula tamanho da chave (próxima potência de 2)
+        tamanho_chave = 2 ** math.ceil(math.log2(n))
+        num_byes = tamanho_chave - n
+        
+        # **LÓGICA CORRIGIDA: Identifica posições de bye e coloca melhores seeds lá**
+        
+        chave_inicial = [None] * tamanho_chave
+        ordem_seeding = self._gerar_ordem_seeding(tamanho_chave)
+        
+        # 1. Identifica quais posições ficarão vazias
+        posicoes_vazias = set(ordem_seeding[n:])  # Últimas posições da ordem seeding
+        
+        # 2. Identifica quais pares terão bye (um atleta, uma posição vazia)
+        posicoes_bye = []
+        posicoes_luta = []
+        
+        for i in range(0, tamanho_chave, 2):
+            pos1, pos2 = i, i + 1
+            
+            # Se uma das posições do par está vazia, a outra terá bye
+            if pos1 in posicoes_vazias and pos2 not in posicoes_vazias:
+                posicoes_bye.append(pos2)  # pos2 terá bye
+            elif pos2 in posicoes_vazias and pos1 not in posicoes_vazias:
+                posicoes_bye.append(pos1)  # pos1 terá bye
+            else:
+                # Ambas ocupadas = luta real
+                if pos1 not in posicoes_vazias:
+                    posicoes_luta.append(pos1)
+                if pos2 not in posicoes_vazias:
+                    posicoes_luta.append(pos2)
+        
+        print(f"DEBUG: Posições de bye: {sorted(posicoes_bye)}")
+        print(f"DEBUG: Posições de luta: {sorted(posicoes_luta)}")
+        
+        # 3. Distribui atletas: melhores seeds nas posições de bye
+        atletas_com_bye = atletas_ordenados[:len(posicoes_bye)]
+        atletas_lutadores = atletas_ordenados[len(posicoes_bye):]
+        
+        # Ordena posições de bye pela ordem seeding (melhores posições primeiro)
+        posicoes_bye_ordenadas = []
+        for pos in ordem_seeding:
+            if pos in posicoes_bye:
+                posicoes_bye_ordenadas.append(pos)
+        
+        # Ordena posições de luta pela ordem seeding
+        posicoes_luta_ordenadas = []
+        for pos in ordem_seeding:
+            if pos in posicoes_luta:
+                posicoes_luta_ordenadas.append(pos)
+        
+        # 4. Coloca melhores seeds nas posições de bye
+        for i, atleta in enumerate(atletas_com_bye):
+            pos = posicoes_bye_ordenadas[i]
+            chave_inicial[pos] = atleta
+            print(f"DEBUG: BYE - Seed #{atleta.seed} ({atleta.nome}) -> posição {pos}")
+        
+        # 5. Distribui atletas lutadores evitando mesma equipe em confrontos precoces
+        if len(atletas_lutadores) > 1:
+            atletas_distribuidos = self._distribuir_por_equipe(atletas_lutadores, posicoes_luta_ordenadas, tamanho_chave)
+            for atleta, pos in atletas_distribuidos:
+                chave_inicial[pos] = atleta
+                print(f"DEBUG: LUTA - Seed #{atleta.seed} ({atleta.nome}) -> posição {pos}")
+        else:
+            for i, atleta in enumerate(atletas_lutadores):
+                pos = posicoes_luta_ordenadas[i]
+                chave_inicial[pos] = atleta
+                print(f"DEBUG: LUTA - Seed #{atleta.seed} ({atleta.nome}) -> posição {pos}")
+        
+        # Cria primeira rodada
+        rodada1 = []
+        numero_luta = 1
+        
+        for i in range(0, tamanho_chave, 2):
+            luta = Luta(chave_inicial[i], chave_inicial[i+1])
+            
+            if luta.atleta1 and luta.atleta2:
+                luta.numero = numero_luta
+                numero_luta += 1
+            elif luta.atleta1 or luta.atleta2:
+                luta.processar()
+                
+            rodada1.append(luta)
+        
+        self.rodadas.append(rodada1)
+        self.nomes_rodadas.append(self._get_nome_rodada(tamanho_chave))
+        
+        # Constrói rodadas subsequentes
+        rodada_anterior = rodada1
+        while len(rodada_anterior) > 1:
+            nova_rodada = []
+            for i in range(0, len(rodada_anterior), 2):
+                vencedor1 = rodada_anterior[i].vencedor if i < len(rodada_anterior) else None
+                vencedor2 = rodada_anterior[i+1].vencedor if i+1 < len(rodada_anterior) else None
+                
+                luta = Luta(vencedor1, vencedor2)
+                if vencedor1 and vencedor2:
+                    luta.numero = numero_luta
+                    numero_luta += 1
+                
+                nova_rodada.append(luta)
+            
+            self.rodadas.append(nova_rodada)
+            self.nomes_rodadas.append(self._get_nome_rodada(len(nova_rodada) * 2))
+            rodada_anterior = nova_rodada
+
+    def _gerar_ordem_seeding(self, n: int) -> List[int]:
+        if n <= 1: return [0]
+        if n == 2: return [0, 1]
+        if n == 4: return [0, 3, 1, 2]
+        if n == 8: return [0, 7, 3, 4, 1, 6, 2, 5]
+        if n == 16: return [0, 15, 7, 8, 3, 12, 4, 11, 1, 14, 6, 9, 2, 13, 5, 10]
+        if n == 32: return [0, 31, 15, 16, 7, 24, 8, 23, 3, 28, 12, 19, 4, 27, 11, 20,
+                             1, 30, 14, 17, 6, 25, 9, 22, 2, 29, 13, 18, 5, 26, 10, 21]
+        if n == 64: return [0, 63, 31, 32, 15, 48, 16, 47, 7, 56, 24, 39, 8, 55, 23, 40,
+                             3, 60, 28, 35, 12, 51, 19, 44, 4, 59, 27, 36, 11, 52, 20, 43,
+                             1, 62, 30, 33, 14, 49, 17, 46, 6, 57, 25, 38, 9, 54, 22, 41,
+                             2, 61, 29, 34, 13, 50, 18, 45, 5, 58, 26, 37, 10, 53, 21, 42]
+        if n == 128: return [0, 127, 63, 64, 31, 96, 32, 95, 15, 112, 48, 79, 16, 111, 47, 80,
+                             7, 120, 56, 71, 24, 103, 39, 88, 8, 119, 55, 72, 23, 104, 40, 87,
+                             3, 124, 60, 67, 28, 99, 35, 92, 12, 115, 51, 76, 19, 108, 44, 83,
+                             4, 123, 59, 68, 27, 100, 36, 91, 11, 116, 52, 75, 20, 107, 43, 84,
+                             1, 126, 62, 65, 30, 97, 33, 94, 14, 113, 49, 78, 17, 110, 46, 81,
+                             6, 121, 57, 70, 25, 102, 38, 89, 9, 118, 54, 73, 22, 105, 41, 86,
+                             2, 125, 61, 66, 29, 98, 34, 93, 13, 114, 50, 77, 18, 109, 45, 82,
+                             5, 122, 58, 69, 26, 101, 37, 90, 10, 117, 53, 74, 21, 106, 42, 85]
+        
+        metade = self._gerar_ordem_seeding(n // 2)
+        ordem = []
+        for i in metade:
+            ordem.append(i)
+            ordem.append(n - 1 - i)
+        return ordem
+        
+    def _get_nome_rodada(self, n: int) -> str:
+        if n == 2: return "FINAL"
+        if n == 4: return "SEMIFINAIS"
+        if n == 8: return "QUARTAS DE FINAL"
+        if n == 16: return "OITAVAS DE FINAL"
+        if n == 32: return "16-AVOS DE FINAL"
+        if n == 64: return "32-AVOS DE FINAL"
+        if n == 128: return "64-AVOS DE FINAL"
+        if n == 256: return "128-AVOS DE FINAL"
+        return f"RODADA DE {n}"
+
+# --- Funções Google Sheets ---
+def carregar_dados_google_sheets(sheet_url: str) -> pd.DataFrame:
     try:
-        driver.get(url)
-        wait = WebDriverWait(driver, 30)
-        
-        status_text.text("Carregando a página e buscando informações...")
-        
-        try:
-            title_element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "h4.MuiTypography-root")))
-            competition_title = title_element.text
-        except Exception:
-            status_text.text("Título da competição não encontrado, usando título padrão.")
-            pass
-
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".MuiAccordion-root")))
-        
-        accordions = driver.find_elements(By.CSS_SELECTOR, ".MuiAccordion-root")
-        total_accordions = len(accordions)
-        lista_de_inscritos = []
-
-        for i, accordion in enumerate(accordions):
-            progress = (i + 1) / total_accordions
-            status_text.text(f"Processando categoria {i + 1} de {total_accordions}...")
-            progress_bar.progress(progress)
+        if "/edit" in sheet_url:
+            sheet_id = sheet_url.split("/d/")[1].split("/edit")[0]
+        else:
+            sheet_id = sheet_url
             
-            try:
-                summary_header = accordion.find_element(By.CSS_SELECTOR, ".MuiAccordionSummary-root")
-                titulo_raw = summary_header.find_element(By.CSS_SELECTOR, ".MuiTypography-root").text
-            except Exception: 
-                continue
-
-            partes_titulo = [p.strip() for p in titulo_raw.split(',')]
-            if len(partes_titulo) >= 4:
-                categoria_idade, faixa, categoria_peso, genero = partes_titulo[0], partes_titulo[1], partes_titulo[2], partes_titulo[3].split(' - ')[0].strip()
-            elif len(partes_titulo) == 3:
-                categoria_idade, faixa, genero_raw = partes_titulo[0], partes_titulo[1], partes_titulo[2]
-                genero, categoria_peso = genero_raw.split(' - ')[0].strip(), "N/A"
-            else: 
-                continue
-
-            try: 
-                driver.execute_script("arguments[0].click();", summary_header)
-                time.sleep(0.5)
-            except Exception: 
-                continue
-
-            cards_inscritos = accordion.find_elements(By.CSS_SELECTOR, ".MuiBox-root.css-g32t2d")
-            for card in cards_inscritos:
-                try:
-                    nome = card.find_element(By.TAG_NAME, "h6").text
-                    infos = card.find_elements(By.TAG_NAME, "p")
-                    equipe = infos[0].text.replace("Equipe: ", "").strip()
-                    professor = infos[1].text.replace("Professor(a): ", "").strip() if len(infos) > 1 else "N/A"
-                    inscrito = {"Nome": nome, "Equipe": equipe, "Professor": professor, "Categoria de Idade": categoria_idade, "Faixa": faixa, "Categoria de Peso": categoria_peso, "Gênero": genero}
-                    lista_de_inscritos.append(inscrito)
-                except Exception: 
-                    continue
+        csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
         
-        if not lista_de_inscritos: 
-            return pd.DataFrame(), competition_title
+        response = requests.get(csv_url)
+        response.raise_for_status()
+        response.encoding = 'utf-8'
+        
+        csv_data = StringIO(response.text)
+        df = pd.read_csv(csv_data)
+        
+        return df
+    except Exception as e:
+        st.error(f"Erro ao carregar planilha: {str(e)}")
+        return pd.DataFrame()
 
-        status_text.text("Finalizando extração. Limpando e organizando os dados...")
-        df = pd.DataFrame(lista_de_inscritos)
-
-        df['Faixa'] = df['Faixa'].str.replace('+', 'E', regex=False)
-        df['Categoria de Peso'] = df['Categoria de Peso'].str.replace(' - ', '/', regex=False)
-        df['Categoria de Idade'] = df['Categoria de Idade'].str.replace(r'\s*\(.*\)', '', regex=True).str.strip()
-        df['Categoria de Peso'] = df['Categoria de Peso'].str.replace(r'\s*\(.*\)', '', regex=True).str.strip()
-        
-        for column in df.select_dtypes(include=['object']).columns:
-            df[column] = df[column].str.normalize('NFD').str.encode('ascii', 'ignore').str.decode('utf-8').str.upper()
-        
-        ordem_final = ["Nome", "Categoria de Idade", "Faixa", "Categoria de Peso", "Gênero", "Equipe", "Professor"]
-        df = df[ordem_final]
-        
-        return df, competition_title
+def processar_atletas_planilha(df: pd.DataFrame) -> List[Atleta]:
+    atletas = []
     
-    finally:
-        driver.quit()
-
-# --- Interface Principal do Streamlit (UI) ---
-st.title("🥋 Dashboard de Análise ProCompetidor")
-st.markdown("Insira a URL de uma página de checagem para extrair, limpar e visualizar os dados dos inscritos.")
-
-url = st.text_input("URL da página de checagem", "https://procompetidor.com.br/checagem/UNpYfAt1jAPYxUTcuhgD")
-
-if st.button("Analisar Competição", type="primary"):
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-
-    df, title = raspar_dados(url, progress_bar, status_text)
+    for i, row in df.iterrows():
+        if pd.notna(row.iloc[0]):
+            nome = sanitizar_string(str(row.iloc[0]))
+            categoria_idade = sanitizar_string(str(row.iloc[1]) if pd.notna(row.iloc[1]) else "")
+            categoria_peso = sanitizar_string(str(row.iloc[2]) if pd.notna(row.iloc[2]) else "")
+            faixa = sanitizar_string(str(row.iloc[4]) if pd.notna(row.iloc[4]) else "")
+            genero = sanitizar_string(str(row.iloc[5]) if pd.notna(row.iloc[5]) else "")
+            
+            if len(row) > 6 and pd.notna(row.iloc[6]):
+                equipe = sanitizar_string(str(row.iloc[6]))
+            else:
+                equipe = sanitizar_string("Equipe não informada")
+            
+            atletas.append(Atleta(
+                nome=nome,
+                equipe=equipe,
+                seed=i+1,
+                categoria_idade=categoria_idade,
+                categoria_peso=categoria_peso,
+                faixa=faixa,
+                genero=genero
+            ))
     
-    status_text.empty()
-    progress_bar.empty()
-    
-    if not df.empty:
-        # Define o título principal da página com o nome do evento
-        st.header(f"Resultados para: {title}", divider='orange')
+    return atletas
 
-        # Apresenta as métricas principais (KPIs)
-        total_atletas = len(df)
-        total_equipes = df['Equipe'].nunique()
-        genero_counts = df['Gênero'].value_counts()
+# --- FUNÇÃO DE VISUALIZAÇÃO RESTAURADA PARA A VERSÃO ORIGINAL E CORRETA ---
+# --- FUNÇÃO DE VISUALIZAÇÃO COM LÓGICA DE BYE CORRIGIDA ---
+def renderizar_bracket_flexbox(chave: ChaveamentoProfissional):
+    """Renderiza bracket com design dark theme integrado e linhas conectoras corretas"""
+    
+    if not chave.rodadas:
+        return
+    
+    css = """
+    <style>
+        .bracket-wrapper {
+            background: transparent;
+            padding: 16px;
+            overflow-x: auto;
+            min-height: 400px;
+        }
         
-        kpi1, kpi2, kpi3 = st.columns(3)
-        kpi1.metric(label="Total de Atletas 👥", value=total_atletas)
-        kpi2.metric(label="Total de Equipes 🛡️", value=total_equipes)
-        kpi3.metric(label="Masculino / Feminino ♂️♀️", value=f"{genero_counts.get('MASCULINO', 0)} / {genero_counts.get('FEMININO', 0)}")
-
-        # Organiza o conteúdo principal em abas
-        tab1, tab2 = st.tabs(["📊 Análise Gráfica", "📋 Tabela de Dados Completa"])
-
-        with tab2:
-            st.subheader(f"Tabela de Competidores Corrigida - {title}")
-            st.dataframe(df)
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button(label="Baixar dados como CSV", data=csv, file_name=f'inscritos_{title}.csv', mime='text/csv')
-
-        with tab1:
-            # Prepara os dados para os gráficos
-            conditions = [df['Categoria de Idade'].str.contains('MASTER'), df['Categoria de Idade'].str.contains('ADULTO')]
-            choices = ['MASTERS', 'ADULTO']
-            df['Grupo Etário'] = np.select(conditions, choices, default='KIDS')
-            gender_colors = {'MASCULINO': '#1f77b4', 'FEMININO': '#e377c2'}
-
-            # Função auxiliar para criar gráficos de barras
-            def create_bar_chart(data_frame, group_by_col, title):
-                grouped_data = data_frame.groupby([group_by_col, 'Gênero']).size().reset_index(name='Contagem')
-                fig = px.bar(grouped_data, x=group_by_col, y='Contagem', color='Gênero', title=title, labels={'Contagem': 'Número de Atletas', group_by_col: title.split(' por ')[-1]}, color_discrete_map=gender_colors, text_auto=True)
-                fig.update_xaxes(categoryorder='total descending', tickangle=-45)
-                st.plotly_chart(fig, use_container_width=True)
-
-            # Gera os gráficos principais
-            col1, col2 = st.columns(2)
-            with col1: 
-                create_bar_chart(df, 'Grupo Etário', 'Atletas por Grupo Etário')
-            with col2: 
-                create_bar_chart(df, 'Categoria de Idade', 'Atletas por Categoria de Idade')
+        .bracket-container {
+            display: flex;
+            gap: 32px;
+            align-items: stretch;
+            min-width: max-content;
+            position: relative;
+        }
+        
+        .rodada-column {
+            display: flex;
+            flex-direction: column;
+            justify-content: space-around;
+            min-width: 180px;
+            position: relative;
+            z-index: 2;
+        }
+        
+        .rodada-titulo {
+            color: #e0e0e0;
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 16px;
+            text-align: center;
+            padding: 8px 6px;
+            background: linear-gradient(135deg, #404040 0%, #333333 100%);
+            border-radius: 6px;
+            border: 1px solid #555555;
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+        }
+        
+        .lutas-container {
+            display: flex;
+            flex-direction: column;
+            justify-content: space-around;
+            flex: 1;
+            gap: 12px;
+        }
+        
+        .luta-wrapper {
+            display: flex;
+            align-items: center;
+            flex: 1;
+            position: relative;
+        }
+        
+        .connector-horizontal {
+            position: absolute;
+            right: -16px;
+            width: 16px;
+            height: 2px;
+            background: #666666;
+            top: 50%;
+            transform: translateY(-1px);
+            z-index: 1;
+        }
+        
+        .connector-vertical-top {
+            position: absolute;
+            right: -16px;
+            width: 2px;
+            background: #666666;
+            height: calc(50% + 6px);
+            bottom: 50%;
+            z-index: 1;
+        }
+        
+        .connector-vertical-bottom {
+            position: absolute;
+            right: -16px;
+            width: 2px;
+            background: #666666;
+            height: calc(50% + 6px);
+            top: 50%;
+            z-index: 1;
+        }
+        
+        .connector-entry {
+            position: absolute;
+            left: -16px;
+            width: 16px;
+            height: 2px;
+            background: #666666;
+            top: 50%;
+            transform: translateY(-1px);
+            z-index: 1;
+        }
+        
+        .fight-card {
+            background: linear-gradient(145deg, #2a2a2a 0%, #1f1f1f 100%);
+            border: 1px solid #444444;
+            border-radius: 6px;
+            width: 100%;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+            transition: all 0.3s ease;
+        }
+        
+        .fight-card:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+            border-color: #666666;
+        }
+        
+        .participant {
+            padding: 6px 10px;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            min-height: 24px;
+            transition: all 0.2s ease;
+        }
+        
+        .participant-top {
+            border-bottom: 1px solid #444444;
+        }
+        
+        .participant-bottom {
+            background: transparent;
+        }
+        
+        .participant-info {
+            flex: 1;
+        }
+        
+        .participant-name {
+            color: #f0f0f0;
+            font-weight: 600;
+            line-height: 1.2;
+        }
+        
+        .participant-team {
+            color: #b0b0b0;
+            font-size: 10px;
+            margin-top: 1px;
+            opacity: 0.9;
+        }
+        
+        .seed {
+            color: #ff9500;
+            font-weight: 700;
+            font-size: 10px;
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+        }
+        
+        .bye {
+            color: #666666;
+            text-align: center;
+            padding: 12px;
+            font-style: italic;
+            font-size: 11px;
+            background: linear-gradient(145deg, #1a1a1a 0%, #0f0f0f 100%);
+            border: 1px dashed #333333;
+        }
+        
+        .winner {
+            background: #2d4a2d !important;
+            border-color: #4caf50 !important;
+        }
+        
+        .winner .participant-name {
+            color: #81c784 !important;
+            font-weight: 700;
+        }
+        
+        .winner .participant-team {
+            color: #a5d6a7 !important;
+        }
+        
+        .trophy {
+            margin-left: 6px;
+            font-size: 12px;
+            filter: drop-shadow(0 1px 2px rgba(255, 215, 0, 0.8));
+        }
+        
+        @media (max-width: 768px) {
+            .bracket-container {
+                gap: 20px;
+            }
             
-            create_bar_chart(df, 'Faixa', 'Atletas por Faixa')
-            create_bar_chart(df, 'Categoria de Peso', 'Atletas por Categoria de Peso')
+            .rodada-column {
+                min-width: 160px;
+            }
             
-            st.subheader("🏆 Análise de Equipes e Professores", divider='orange')
+            .participant {
+                padding: 5px 8px;
+                font-size: 11px;
+            }
             
-            # Função auxiliar para criar gráficos de Top 10
-            def create_top10_chart(data_frame, group_by_col, title):
-                top_10_list = data_frame[group_by_col].value_counts().nlargest(10).index
-                df_top10 = data_frame[data_frame[group_by_col].isin(top_10_list)]
-                create_bar_chart(df_top10, group_by_col, title)
+            .rodada-titulo {
+                font-size: 10px;
+                padding: 6px 4px;
+            }
+        }
+    </style>
+    """
+    
+    html_parts = ['<div class="bracket-wrapper"><div class="bracket-container">']
+    
+    for rodada_idx, (rodada, nome) in enumerate(zip(chave.rodadas, chave.nomes_rodadas)):
+        html_parts.append('<div class="rodada-column">')
+        html_parts.append(f'<div class="rodada-titulo">{nome}</div>')
+        html_parts.append('<div class="lutas-container">')
+        
+        for luta_idx, luta in enumerate(rodada):
+            html_parts.append('<div class="luta-wrapper">')
+            html_parts.append('<div class="fight-card">')
             
-            # Gera os gráficos de Top 10
-            col3, col4 = st.columns(2)
-            with col3: 
-                create_top10_chart(df, 'Equipe', 'Top 10 Equipes com Mais Atletas')
-            with col4: 
-                create_top10_chart(df, 'Professor', 'Top 10 Professores com Mais Atletas')
+            # Caso de uma luta futura completamente vazia
+            if not luta.atleta1 and not luta.atleta2:
+                html_parts.append('<div class="participant participant-top"><div class="participant-info">&nbsp;</div></div>')
+                html_parts.append('<div class="participant participant-bottom"><div class="participant-info">&nbsp;</div></div>')
+            else:
+                # --- Lógica de renderização do Atleta 1 ---
+                if luta.atleta1:
+                    winner_class = "winner" if luta.vencedor == luta.atleta1 else ""
+                    seed_text = f' <span class="seed">#{luta.atleta1.seed}</span>'
+                    
+                    html_parts.append(f'<div class="participant participant-top {winner_class}">')
+                    html_parts.append('<div class="participant-info">')
+                    html_parts.append(f'<div class="participant-name">{luta.atleta1.nome}{seed_text}</div>')
+                    html_parts.append(f'<div class="participant-team">{luta.atleta1.equipe}</div>')
+                    html_parts.append('</div></div>')
+                else:
+                    # ******** CORREÇÃO APLICADA AQUI ********
+                    # Só mostra BYE na primeira rodada. Nas outras, mostra um slot vazio.
+                    if rodada_idx == 0:
+                        html_parts.append('<div class="bye">BYE</div>')
+                    else:
+                        html_parts.append('<div class="participant participant-top"><div class="participant-info">&nbsp;</div></div>')
 
+                # --- Lógica de renderização do Atleta 2 ---
+                if luta.atleta2:
+                    winner_class = "winner" if luta.vencedor == luta.atleta2 else ""
+                    seed_text = f' <span class="seed">#{luta.atleta2.seed}</span>'
+                    
+                    html_parts.append(f'<div class="participant participant-bottom {winner_class}">')
+                    html_parts.append('<div class="participant-info">')
+                    html_parts.append(f'<div class="participant-name">{luta.atleta2.nome}{seed_text}</div>')
+                    html_parts.append(f'<div class="participant-team">{luta.atleta2.equipe}</div>')
+                    html_parts.append('</div></div>')
+                elif luta.atleta1:
+                    # ******** CORREÇÃO APLICADA AQUI ********
+                    # Só mostra BYE na primeira rodada. Nas outras, mostra um slot vazio.
+                    if rodada_idx == 0:
+                        html_parts.append('<div class="bye">BYE</div>')
+                    else:
+                        html_parts.append('<div class="participant participant-bottom"><div class="participant-info">&nbsp;</div></div>')
+            
+            html_parts.append('</div>')
+            
+            if rodada_idx > 0:
+                html_parts.append('<div class="connector-entry"></div>')
+            
+            if rodada_idx < len(chave.rodadas) - 1:
+                html_parts.append('<div class="connector-horizontal"></div>')
+                
+                if luta_idx % 2 == 0:
+                    html_parts.append('<div class="connector-vertical-bottom"></div>')
+                else:
+                    html_parts.append('<div class="connector-vertical-top"></div>')
+            
+            html_parts.append('</div>')
+        
+        html_parts.append('</div></div>')
+    
+    html_parts.append('</div></div>')
+    
+    st.markdown(css, unsafe_allow_html=True)
+    st.markdown(''.join(html_parts), unsafe_allow_html=True)
+
+# --- Custom Dark Theme CSS for Streamlit ---
+def apply_dark_theme():
+    st.markdown("""
+    <style>
+        .stApp {
+            background: linear-gradient(135deg, #0f0f0f 0%, #1a1a1a 100%);
+        }
+        
+        .css-1d391kg {
+            background: linear-gradient(180deg, #1a1a1a 0%, #0f0f0f 100%);
+            border-right: 1px solid #333333;
+        }
+        
+        .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
+            color: #e0e0e0 !important;
+            text-shadow: 0 2px 4px rgba(0, 0, 0, 0.8);
+        }
+        
+        .css-1d391kg .stMarkdown h2 {
+            color: #f0f0f0 !important;
+        }
+        
+        .stAlert {
+            background: rgba(45, 45, 45, 0.8) !important;
+            border: 1px solid #444444 !important;
+            border-radius: 8px !important;
+        }
+        
+        div[data-testid="metric-container"] {
+            background: linear-gradient(145deg, #2a2a2a 0%, #1f1f1f 100%);
+            border: 1px solid #444444;
+            border-radius: 8px;
+            padding: 1rem;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+        }
+        
+        .stButton > button {
+            background: linear-gradient(145deg, #ff6b35 0%, #f7931e 100%) !important;
+            color: white !important;
+            border: none !important;
+            border-radius: 8px !important;
+            font-weight: 600 !important;
+            box-shadow: 0 4px 16px rgba(255, 107, 53, 0.3) !important;
+            transition: all 0.3s ease !important;
+        }
+        
+        .stButton > button:hover {
+            transform: translateY(-2px) !important;
+            box-shadow: 0 6px 20px rgba(255, 107, 53, 0.4) !important;
+        }
+        
+        hr {
+            border-color: #444444 !important;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- Interface Principal ---
+def app():
+    apply_dark_theme()
+    
+    st.title("Sistema de Chaves IBJJF")
+    st.markdown("**Geração automática por categorias**")
+
+    with st.sidebar:
+        st.header("Configurações")
+        
+        sheet_url = st.text_input(
+            "URL do Google Sheets:",
+            value=" ",
+            help="Cole a URL pública do Google Sheets"
+        )
+        
+        if st.button("Carregar Dados", type="primary", use_container_width=True):
+            with st.spinner("Carregando dados..."):
+                df = carregar_dados_google_sheets(sheet_url)
+                if not df.empty:
+                    st.session_state.df_atletas = df
+                    st.session_state.atletas_processados = processar_atletas_planilha(df)
+                    st.success(f"{len(st.session_state.atletas_processados)} atletas carregados!")
+
+        if 'atletas_processados' in st.session_state:
+            st.divider()
+            
+            atletas = st.session_state.atletas_processados
+            
+            generos_disponiveis = sorted(list(set(a.genero for a in atletas if a.genero)))
+            genero_sel = st.selectbox("Gênero:", generos_disponiveis if generos_disponiveis else ["Nenhum"])
+            
+            atletas_filtrados_genero = [a for a in atletas if a.genero == genero_sel]
+
+            faixas_disponiveis = sorted(list(set(a.faixa for a in atletas_filtrados_genero if a.faixa)))
+            faixa_sel = st.selectbox("Faixa:", faixas_disponiveis if faixas_disponiveis else ["Nenhuma"])
+            
+            atletas_filtrados_faixa = [a for a in atletas_filtrados_genero if a.faixa == faixa_sel]
+
+            idades_disponiveis = sorted(list(set(a.categoria_idade for a in atletas_filtrados_faixa if a.categoria_idade)))
+            categoria_idade_sel = st.selectbox("Categoria de Idade:", idades_disponiveis if idades_disponiveis else ["Nenhuma"])
+
+            atletas_filtrados_idade = [a for a in atletas_filtrados_faixa if a.categoria_idade == categoria_idade_sel]
+
+            pesos_disponiveis = sorted(list(set(a.categoria_peso for a in atletas_filtrados_idade if a.categoria_peso)))
+            categoria_peso_sel = st.selectbox("Categoria de Peso:", pesos_disponiveis if pesos_disponiveis else ["Nenhuma"])
+
+            atletas_filtrados = [a for a in atletas_filtrados_idade if a.categoria_peso == categoria_peso_sel]
+            
+            # ******** NOVA LÓGICA DE REATRIBUIÇÃO DE SEED ********
+            # Reatribui os seeds de 1 a N para os atletas da categoria filtrada,
+            # mantendo a ordem original da planilha como critério de desempate.
+            for novo_seed, atleta in enumerate(atletas_filtrados, start=1):
+                atleta.seed = novo_seed
+            # ******************************************************
+            
+            st.info(f"Atletas encontrados: {len(atletas_filtrados)}")
+            
+            if len(atletas_filtrados) >= 2:
+                if st.button("Gerar Chave", use_container_width=True):
+                    categoria_completa = f"{categoria_idade_sel} / {genero_sel} / {categoria_peso_sel} / {faixa_sel}"
+                    st.session_state.chaveamento = ChaveamentoProfissional(atletas_filtrados, categoria_completa)
+            elif len(atletas_filtrados) == 1:
+                st.warning("Apenas 1 atleta encontrado")
+            else:
+                st.warning("Nenhum atleta encontrado com estes filtros")
+
+    if 'chaveamento' in st.session_state:
+        chave = st.session_state.chaveamento
+        
+        st.header(chave.categoria)
+        st.markdown(f"**{len(chave.atletas)} atletas**")
+        
+        st.divider()
+        st.subheader("Chaveamento")
+        renderizar_bracket_flexbox(chave)
+    
     else:
-        st.warning("Nenhum dado foi encontrado. A URL pode estar inativa ou a estrutura do site mudou.")
+        st.info("Carregue os dados e selecione os filtros para gerar uma chave")
 
+if __name__ == "__main__":
+    app()
