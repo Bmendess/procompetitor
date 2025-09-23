@@ -59,123 +59,107 @@ class ChaveamentoProfissional:
             self._construir_chave_parcial()
 
     def _distribuir_por_equipe(self, atletas: List[Atleta], posicoes: List[int], tamanho_chave: int) -> List[tuple]:
-            """
-            Distribui atletas evitando que mesma equipe se enfrente antes da final/semifinal
-            """
-            # Agrupa atletas por equipe
-            equipes = {}
-            for atleta in atletas:
-                if atleta.equipe not in equipes:
-                    equipes[atleta.equipe] = []
-                equipes[atleta.equipe].append(atleta)
+        """
+        Distribui atletas evitando que mesma equipe se enfrente antes da final/semifinal
+        """
+        # Agrupa atletas por equipe
+        equipes = {}
+        for atleta in atletas:
+            if atleta.equipe not in equipes:
+                equipes[atleta.equipe] = []
+            equipes[atleta.equipe].append(atleta)
+        
+        # Define quadrantes baseado no tamanho da chave
+        num_quadrantes = min(4, tamanho_chave // 4) if tamanho_chave >= 8 else 2
+        tamanho_quadrante = len(posicoes) // num_quadrantes
+        
+        quadrantes = []
+        for i in range(num_quadrantes):
+            inicio = i * tamanho_quadrante
+            fim = inicio + tamanho_quadrante if i < num_quadrantes - 1 else len(posicoes)
+            quadrantes.append(posicoes[inicio:fim])
+        
+        print(f"DEBUG: Distribuindo {len(atletas)} atletas em {num_quadrantes} quadrantes")
+        
+        # Distribui atletas da mesma equipe em quadrantes diferentes
+        resultado = []
+        quadrante_atual = 0
+        
+        for equipe, atletas_equipe in equipes.items():
+            if len(atletas_equipe) > 1:
+                print(f"DEBUG: Equipe '{equipe}' tem {len(atletas_equipe)} atletas - separando")
             
-            # Define quadrantes baseado no tamanho da chave
-            num_quadrantes = min(4, tamanho_chave // 4) if tamanho_chave >= 8 else 2
-            tamanho_quadrante = len(posicoes) // num_quadrantes
-            
-            quadrantes = []
-            for i in range(num_quadrantes):
-                inicio = i * tamanho_quadrante
-                fim = inicio + tamanho_quadrante if i < num_quadrantes - 1 else len(posicoes)
-                quadrantes.append(posicoes[inicio:fim])
-            
-            print(f"DEBUG: Distribuindo {len(atletas)} atletas em {num_quadrantes} quadrantes")
-            
-            # Distribui atletas da mesma equipe em quadrantes diferentes
-            resultado = []
-            quadrante_atual = 0
-            
-            for equipe, atletas_equipe in equipes.items():
-                if len(atletas_equipe) > 1:
-                    print(f"DEBUG: Equipe '{equipe}' tem {len(atletas_equipe)} atletas - separando")
+            for atleta in atletas_equipe:
+                # Encontra posição disponível no quadrante atual
+                if quadrantes[quadrante_atual]:
+                    pos = quadrantes[quadrante_atual].pop(0)
+                    resultado.append((atleta, pos))
+                    print(f"DEBUG: {atleta.nome} ({equipe}) -> quadrante {quadrante_atual + 1}, posição {pos}")
                 
-                for atleta in atletas_equipe:
-                    # Encontra posição disponível no quadrante atual
-                    if quadrantes[quadrante_atual]:
-                        pos = quadrantes[quadrante_atual].pop(0)
-                        resultado.append((atleta, pos))
-                        print(f"DEBUG: {atleta.nome} ({equipe}) -> quadrante {quadrante_atual + 1}, posição {pos}")
-                    
-                    # Muda para próximo quadrante se há múltiplos atletas da mesma equipe
-                    if len(atletas_equipe) > 1:
-                        quadrante_atual = (quadrante_atual + 1) % num_quadrantes
-            
-            return resultado
+                # Muda para próximo quadrante se há múltiplos atletas da mesma equipe
+                if len(atletas_equipe) > 1:
+                    quadrante_atual = (quadrante_atual + 1) % num_quadrantes
+        
+        return resultado
 
     def _construir_chave_parcial(self):
         n = len(self.atletas)
-        if n == 0: return
+        if n == 0: 
+            return
 
-        # Ordena atletas por seed (melhores primeiro)
-        atletas_ordenados = sorted(self.atletas, key=lambda x: x.seed if x.seed > 0 else 999)
+        # USA ORDEM DA LISTA COMO SEED (mais simples e direto)
+        # Já estão ordenados por seed que vem da ordem da planilha
+        atletas_ordenados = sorted(self.atletas, key=lambda x: x.seed)
         
-        # Calcula tamanho da chave (próxima potência de 2)
         tamanho_chave = 2 ** math.ceil(math.log2(n))
         num_byes = tamanho_chave - n
         
-        # **LÓGICA CORRIGIDA: Identifica posições de bye e coloca melhores seeds lá**
+        print(f"DEBUG: {n} atletas, chave {tamanho_chave}, {num_byes} byes")
         
+        # Identifica quais posições resultarão em bye
         chave_inicial = [None] * tamanho_chave
         ordem_seeding = self._gerar_ordem_seeding(tamanho_chave)
         
-        # 1. Identifica quais posições ficarão vazias
-        posicoes_vazias = set(ordem_seeding[n:])  # Últimas posições da ordem seeding
+        # Coloca atletas nas primeiras N posições da ordem seeding
+        for i, atleta in enumerate(atletas_ordenados):
+            pos = ordem_seeding[i]
+            chave_inicial[pos] = atleta
         
-        # 2. Identifica quais pares terão bye (um atleta, uma posição vazia)
+        # Identifica posições que terão bye
         posicoes_bye = []
-        posicoes_luta = []
-        
         for i in range(0, tamanho_chave, 2):
             pos1, pos2 = i, i + 1
+            if chave_inicial[pos1] and not chave_inicial[pos2]:
+                posicoes_bye.append(pos1)
+            elif chave_inicial[pos2] and not chave_inicial[pos1]:
+                posicoes_bye.append(pos2)
+        
+        print(f"DEBUG: Posições com bye: {posicoes_bye}")
+        
+        # Reorganiza: melhores seeds nas posições de bye
+        if posicoes_bye:
+            # Ordena posições de bye pela ordem seeding
+            posicoes_bye_ordenadas = [pos for pos in ordem_seeding if pos in posicoes_bye]
             
-            # Se uma das posições do par está vazia, a outra terá bye
-            if pos1 in posicoes_vazias and pos2 not in posicoes_vazias:
-                posicoes_bye.append(pos2)  # pos2 terá bye
-            elif pos2 in posicoes_vazias and pos1 not in posicoes_vazias:
-                posicoes_bye.append(pos1)  # pos1 terá bye
-            else:
-                # Ambas ocupadas = luta real
-                if pos1 not in posicoes_vazias:
-                    posicoes_luta.append(pos1)
-                if pos2 not in posicoes_vazias:
-                    posicoes_luta.append(pos2)
-        
-        print(f"DEBUG: Posições de bye: {sorted(posicoes_bye)}")
-        print(f"DEBUG: Posições de luta: {sorted(posicoes_luta)}")
-        
-        # 3. Distribui atletas: melhores seeds nas posições de bye
-        atletas_com_bye = atletas_ordenados[:len(posicoes_bye)]
-        atletas_lutadores = atletas_ordenados[len(posicoes_bye):]
-        
-        # Ordena posições de bye pela ordem seeding (melhores posições primeiro)
-        posicoes_bye_ordenadas = []
-        for pos in ordem_seeding:
-            if pos in posicoes_bye:
-                posicoes_bye_ordenadas.append(pos)
-        
-        # Ordena posições de luta pela ordem seeding
-        posicoes_luta_ordenadas = []
-        for pos in ordem_seeding:
-            if pos in posicoes_luta:
-                posicoes_luta_ordenadas.append(pos)
-        
-        # 4. Coloca melhores seeds nas posições de bye
-        for i, atleta in enumerate(atletas_com_bye):
-            pos = posicoes_bye_ordenadas[i]
-            chave_inicial[pos] = atleta
-            print(f"DEBUG: BYE - Seed #{atleta.seed} ({atleta.nome}) -> posição {pos}")
-        
-        # 5. Distribui atletas lutadores evitando mesma equipe em confrontos precoces
-        if len(atletas_lutadores) > 1:
-            atletas_distribuidos = self._distribuir_por_equipe(atletas_lutadores, posicoes_luta_ordenadas, tamanho_chave)
-            for atleta, pos in atletas_distribuidos:
-                chave_inicial[pos] = atleta
-                print(f"DEBUG: LUTA - Seed #{atleta.seed} ({atleta.nome}) -> posição {pos}")
-        else:
-            for i, atleta in enumerate(atletas_lutadores):
-                pos = posicoes_luta_ordenadas[i]
-                chave_inicial[pos] = atleta
-                print(f"DEBUG: LUTA - Seed #{atleta.seed} ({atleta.nome}) -> posição {pos}")
+            # Limpa chave e redistribui
+            chave_inicial = [None] * tamanho_chave
+            
+            # Coloca melhores seeds nas posições de bye
+            for i, pos in enumerate(posicoes_bye_ordenadas):
+                if i < len(atletas_ordenados):
+                    chave_inicial[pos] = atletas_ordenados[i]
+                    print(f"DEBUG: BYE - {atletas_ordenados[i].nome} (seed #{atletas_ordenados[i].seed}) -> posição {pos}")
+            
+            # Coloca demais atletas nas posições restantes
+            pos_ocupadas = set(posicoes_bye_ordenadas)
+            pos_livres = [pos for pos in ordem_seeding if pos not in pos_ocupadas]
+            
+            idx_atleta = len(posicoes_bye_ordenadas)
+            for pos in pos_livres:
+                if idx_atleta < len(atletas_ordenados):
+                    chave_inicial[pos] = atletas_ordenados[idx_atleta]
+                    print(f"DEBUG: LUTA - {atletas_ordenados[idx_atleta].nome} (seed #{atletas_ordenados[idx_atleta].seed}) -> posição {pos}")
+                    idx_atleta += 1
         
         # Cria primeira rodada
         rodada1 = []
@@ -187,15 +171,18 @@ class ChaveamentoProfissional:
             if luta.atleta1 and luta.atleta2:
                 luta.numero = numero_luta
                 numero_luta += 1
+                print(f"DEBUG: Luta {numero_luta-1}: {luta.atleta1.nome} vs {luta.atleta2.nome}")
             elif luta.atleta1 or luta.atleta2:
                 luta.processar()
+                vencedor = luta.atleta1 or luta.atleta2
+                print(f"DEBUG: Bye para: {vencedor.nome}")
                 
             rodada1.append(luta)
         
         self.rodadas.append(rodada1)
         self.nomes_rodadas.append(self._get_nome_rodada(tamanho_chave))
         
-        # Constrói rodadas subsequentes
+        # Rodadas subsequentes
         rodada_anterior = rodada1
         while len(rodada_anterior) > 1:
             nova_rodada = []
