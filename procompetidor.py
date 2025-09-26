@@ -5,7 +5,7 @@ Sistema de Chaves IBJJF - Geração Automática de Chaveamentos
 Sistema para geração automática de chaves de torneio seguindo padrões IBJJF,
 com interface web usando Streamlit e integração com Google Sheets.
 
-Autor: Bruno Mendes
+Autor: Sistema IBJJF
 Versão: 2.0
 """
 
@@ -267,77 +267,121 @@ class TournamentBracket:
 
     def _create_initial_bracket(self) -> List[Optional[Athlete]]:
         """
-        Cria chave inicial com atletas posicionados e byes.
+        Cria chave inicial com seeding otimizado e separação de equipes.
         
         Returns:
             Lista representando a chave inicial
         """
-        bracket_size, num_byes = self._calculate_bracket_size()
+        try:
+            bracket_size, num_byes = self._calculate_bracket_size()
+            sorted_athletes = sorted(self.athletes, key=lambda x: x.seed)
+            
+            # Cria pares de confronto otimizados
+            matchups = self._create_optimal_matchups(sorted_athletes, bracket_size)
+            
+            # Distribui considerando equipes
+            initial_bracket = self._distribute_with_team_separation(matchups, bracket_size)
+            
+            return initial_bracket
+        except Exception as e:
+            print(f"DEBUG: Erro na criação da chave: {e}")
+            return self._create_fallback_bracket()
+
+    def _create_optimal_matchups(self, sorted_athletes: List[Athlete], bracket_size: int) -> List[Tuple[Optional[Athlete], Optional[Athlete]]]:
+        """Cria confrontos otimizados: #1vs#N, #2vs#N-1, etc."""
+        matchups = []
+        n = len(sorted_athletes)
+        
+        try:
+            for i in range(bracket_size // 2):
+                if i < n:
+                    top_seed = sorted_athletes[i]
+                    opponent_idx = n - 1 - i
+                    bottom_seed = sorted_athletes[opponent_idx] if opponent_idx > i else None
+                    matchups.append((top_seed, bottom_seed))
+                else:
+                    matchups.append((None, None))
+            
+            print(f"DEBUG: Criados {len(matchups)} confrontos para {n} atletas")
+            return matchups
+        except Exception as e:
+            print(f"DEBUG: Erro nos confrontos: {e}")
+            return [(None, None)] * (bracket_size // 2)
+
+    def _distribute_with_team_separation(self, matchups: List[Tuple[Optional[Athlete], Optional[Athlete]]], bracket_size: int) -> List[Optional[Athlete]]:
+        """Distribui confrontos separando equipes em quadrantes."""
+        bracket = [None] * bracket_size
+        
+        try:
+            # Separa confrontos em metades da chave
+            mid_point = len(matchups) // 2
+            first_half = matchups[:mid_point]
+            second_half = matchups[mid_point:]
+            
+            # Ajusta por equipes se necessário
+            first_half, second_half = self._adjust_team_distribution(first_half, second_half)
+            
+            # Preenche bracket
+            pos = 0
+            for matchup in first_half + second_half:
+                bracket[pos] = matchup[0]
+                bracket[pos + 1] = matchup[1]
+                pos += 2
+            
+            return bracket
+        except Exception as e:
+            print(f"DEBUG: Erro na distribuição: {e}")
+            return self._create_fallback_bracket()
+
+    def _adjust_team_distribution(self, first_half: List[Tuple], second_half: List[Tuple]) -> Tuple[List[Tuple], List[Tuple]]:
+        """Ajusta distribuição para separar atletas da mesma equipe."""
+        try:
+            # Identifica equipes duplicadas entre metades
+            first_teams = set()
+            second_teams = set()
+            
+            for matchup in first_half:
+                for athlete in matchup:
+                    if athlete:
+                        first_teams.add(athlete.team)
+            
+            for matchup in second_half:
+                for athlete in matchup:
+                    if athlete:
+                        second_teams.add(athlete.team)
+            
+            conflicts = first_teams & second_teams
+            
+            if conflicts:
+                print(f"DEBUG: Conflitos de equipe detectados: {conflicts}")
+                # Troca confrontos com conflito para metades opostas
+                for i, matchup in enumerate(first_half):
+                    for athlete in matchup:
+                        if athlete and athlete.team in conflicts:
+                            # Procura posição na segunda metade para trocar
+                            for j, other_matchup in enumerate(second_half):
+                                if not any(a and a.team == athlete.team for a in other_matchup):
+                                    first_half[i], second_half[j] = second_half[j], first_half[i]
+                                    break
+                            break
+            
+            return first_half, second_half
+        except Exception as e:
+            print(f"DEBUG: Erro no ajuste de equipes: {e}")
+            return first_half, second_half
+
+    def _create_fallback_bracket(self) -> List[Optional[Athlete]]:
+        """Cria chave básica em caso de erro."""
+        bracket_size, _ = self._calculate_bracket_size()
+        sorted_athletes = sorted(self.athletes, key=lambda x: x.seed)
         seeding_order = SeedingGenerator.generate_seeding_order(bracket_size)
         
-        # Ordena atletas por seed
-        sorted_athletes = sorted(self.athletes, key=lambda x: x.seed)
-        
-        # Cria chave inicial vazia
-        initial_bracket = [None] * bracket_size
-        
-        # Posiciona atletas seguindo ordem de seeding
+        bracket = [None] * bracket_size
         for i, athlete in enumerate(sorted_athletes):
-            position = seeding_order[i]
-            initial_bracket[position] = athlete
+            if i < len(seeding_order):
+                bracket[seeding_order[i]] = athlete
         
-        self._optimize_bye_positions(initial_bracket, seeding_order, sorted_athletes)
-        
-        return initial_bracket
-
-    def _optimize_bye_positions(
-        self, 
-        bracket: List[Optional[Athlete]], 
-        seeding_order: List[int], 
-        sorted_athletes: List[Athlete]
-    ) -> None:
-        """
-        Otimiza posições de bye para que melhores seeds recebam bye.
-        
-        Args:
-            bracket: Chave atual
-            seeding_order: Ordem de seeding
-            sorted_athletes: Atletas ordenados por seed
-        """
-        # Identifica posições que resultarão em bye
-        bye_positions = []
-        bracket_size = len(bracket)
-        
-        for i in range(0, bracket_size, 2):
-            pos1, pos2 = i, i + 1
-            if (bracket[pos1] and not bracket[pos2]) or (bracket[pos2] and not bracket[pos1]):
-                bye_pos = pos1 if bracket[pos1] else pos2
-                bye_positions.append(bye_pos)
-        
-        if not bye_positions:
-            return
-        
-        # Reordena: melhores seeds nas posições de bye
-        bracket.clear()
-        bracket.extend([None] * bracket_size)
-        
-        # Ordena posições de bye pela ordem de seeding
-        ordered_bye_positions = [pos for pos in seeding_order if pos in bye_positions]
-        
-        # Coloca melhores seeds nas posições de bye
-        for i, position in enumerate(ordered_bye_positions):
-            if i < len(sorted_athletes):
-                bracket[position] = sorted_athletes[i]
-        
-        # Coloca demais atletas nas posições restantes
-        occupied_positions = set(ordered_bye_positions)
-        free_positions = [pos for pos in seeding_order if pos not in occupied_positions]
-        
-        athlete_index = len(ordered_bye_positions)
-        for position in free_positions:
-            if athlete_index < len(sorted_athletes):
-                bracket[position] = sorted_athletes[athlete_index]
-                athlete_index += 1
+        return bracket
 
     def _create_first_round(self, initial_bracket: List[Optional[Athlete]]) -> List[Match]:
         """
