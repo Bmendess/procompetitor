@@ -1,28 +1,20 @@
 """
-Sistema Integrado de Análise e Chaveamento IBJJF
-=================================================
+Sistema de Chaves IBJJF - Geração Automática de Chaveamentos
+============================================================
 
-Sistema completo que:
-1. Extrai dados de competidores do ProCompetidor
-2. Gera análises e dashboards
-3. Cria chaveamentos automáticos seguindo padrões IBJJF
+Sistema para geração automática de chaves de torneio seguindo padrões IBJJF,
+com interface web usando Streamlit e integração com Google Sheets.
 
-Versão: 3.0 - Integrada
+Autor: Sistema IBJJF
+Versão: 2.0
 """
 
 import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.express as px
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-import time
 import random
 import math
+import pandas as pd
+import requests
+from io import StringIO
 from typing import List, Optional, Dict, Tuple
 import unicodedata
 
@@ -31,127 +23,59 @@ import unicodedata
 # CONFIGURAÇÃO DA APLICAÇÃO
 # ========================================================================
 
-st.set_page_config(
-    page_title="Sistema Integrado IBJJF",
-    page_icon="🥋",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+def configure_streamlit() -> None:
+    """Configura as opções básicas do Streamlit."""
+    st.set_page_config(
+        page_title="Sistema de Chaves IBJJF", 
+        layout="wide", 
+        initial_sidebar_state="expanded"
+    )
 
 
 # ========================================================================
-# EXTRAÇÃO DE DADOS (ProCompetidor)
+# UTILITÁRIOS DE DADOS
 # ========================================================================
 
-def raspar_dados(url, progress_bar, status_text):
+def sanitize_text(text: str) -> str:
     """
-    Extrai dados de competidores do ProCompetidor usando Selenium.
+    Sanitiza texto removendo acentos e padronizando formato.
+    
+    Args:
+        text: Texto a ser sanitizado
+        
+    Returns:
+        Texto sanitizado em maiúsculas sem acentos
     """
-    chrome_options = Options()
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--window-size=1920,1080")
-
-    service = Service(executable_path="/usr/bin/chromedriver")
-    driver = webdriver.Chrome(service=service, options=chrome_options) 
+    if not isinstance(text, str):
+        return ""
     
-    competition_title = "Competição"
+    # Remove acentos usando normalização Unicode
+    normalized_text = unicodedata.normalize('NFD', text)
+    accent_free_text = "".join(
+        char for char in normalized_text 
+        if unicodedata.category(char) != 'Mn'
+    )
     
-    try:
-        driver.get(url)
-        wait = WebDriverWait(driver, 30)
-        
-        status_text.text("Carregando a página e buscando informações...")
-        
-        try:
-            title_element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "h4.MuiTypography-root")))
-            competition_title = title_element.text
-        except Exception:
-            status_text.text("Título da competição não encontrado, usando título padrão.")
-            pass
-
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".MuiAccordion-root")))
-        
-        accordions = driver.find_elements(By.CSS_SELECTOR, ".MuiAccordion-root")
-        total_accordions = len(accordions)
-        lista_de_inscritos = []
-
-        for i, accordion in enumerate(accordions):
-            progress = (i + 1) / total_accordions
-            status_text.text(f"Processando categoria {i + 1} de {total_accordions}...")
-            progress_bar.progress(progress)
-            
-            try:
-                summary_header = accordion.find_element(By.CSS_SELECTOR, ".MuiAccordionSummary-root")
-                titulo_raw = summary_header.find_element(By.CSS_SELECTOR, ".MuiTypography-root").text
-            except Exception: 
-                continue
-
-            partes_titulo = [p.strip() for p in titulo_raw.split(',')]
-            if len(partes_titulo) >= 4:
-                categoria_idade, faixa, categoria_peso, genero = partes_titulo[0], partes_titulo[1], partes_titulo[2], partes_titulo[3].split(' - ')[0].strip()
-            elif len(partes_titulo) == 3:
-                categoria_idade, faixa, genero_raw = partes_titulo[0], partes_titulo[1], partes_titulo[2]
-                genero, categoria_peso = genero_raw.split(' - ')[0].strip(), "N/A"
-            else: 
-                continue
-
-            try: 
-                driver.execute_script("arguments[0].click();", summary_header)
-                time.sleep(0.5)
-            except Exception: 
-                continue
-
-            cards_inscritos = accordion.find_elements(By.CSS_SELECTOR, ".MuiBox-root.css-g32t2d")
-            for card in cards_inscritos:
-                try:
-                    nome = card.find_element(By.TAG_NAME, "h6").text
-                    infos = card.find_elements(By.TAG_NAME, "p")
-                    equipe = infos[0].text.replace("Equipe: ", "").strip()
-                    professor = infos[1].text.replace("Professor(a): ", "").strip() if len(infos) > 1 else "N/A"
-                    inscrito = {
-                        "Nome": nome, 
-                        "Equipe": equipe, 
-                        "Professor": professor, 
-                        "Categoria de Idade": categoria_idade, 
-                        "Faixa": faixa, 
-                        "Categoria de Peso": categoria_peso, 
-                        "Gênero": genero
-                    }
-                    lista_de_inscritos.append(inscrito)
-                except Exception: 
-                    continue
-        
-        if not lista_de_inscritos: 
-            return pd.DataFrame(), competition_title
-
-        status_text.text("Finalizando extração. Limpando e organizando os dados...")
-        df = pd.DataFrame(lista_de_inscritos)
-
-        df['Faixa'] = df['Faixa'].str.replace('+', 'E', regex=False)
-        df['Categoria de Peso'] = df['Categoria de Peso'].str.replace(' - ', '/', regex=False)
-        df['Categoria de Idade'] = df['Categoria de Idade'].str.replace(r'\s*\(.*\)', '', regex=True).str.strip()
-        df['Categoria de Peso'] = df['Categoria de Peso'].str.replace(r'\s*\(.*\)', '', regex=True).str.strip()
-        
-        for column in df.select_dtypes(include=['object']).columns:
-            df[column] = df[column].str.normalize('NFD').str.encode('ascii', 'ignore').str.decode('utf-8').str.upper()
-        
-        ordem_final = ["Nome", "Categoria de Idade", "Faixa", "Categoria de Peso", "Gênero", "Equipe", "Professor"]
-        df = df[ordem_final]
-        
-        return df, competition_title
-    
-    finally:
-        driver.quit()
+    return accent_free_text.upper().strip()
 
 
 # ========================================================================
-# CLASSES DE DADOS (Sistema de Chaves)
+# CLASSES DE DADOS
 # ========================================================================
 
 class Athlete:
-    """Representa um atleta no sistema de chaveamento."""
+    """
+    Representa um atleta no sistema de chaveamento.
+    
+    Attributes:
+        name: Nome do atleta
+        team: Nome da equipe
+        seed: Posição no seeding (1 = melhor seed)
+        age_category: Categoria de idade (ex: "ADULTO", "MASTER")
+        weight_category: Categoria de peso (ex: "LEVE", "MEDIO")
+        belt: Faixa do atleta (ex: "BRANCA", "AZUL")
+        gender: Gênero ("MASCULINO", "FEMININO")
+    """
     
     def __init__(
         self, 
@@ -176,7 +100,15 @@ class Athlete:
 
 
 class Match:
-    """Representa uma luta no chaveamento."""
+    """
+    Representa uma luta no chaveamento.
+    
+    Attributes:
+        athlete1: Primeiro atleta da luta
+        athlete2: Segundo atleta da luta
+        winner: Vencedor da luta (None se não definido)
+        number: Número identificador da luta
+    """
     
     def __init__(
         self, 
@@ -189,7 +121,12 @@ class Match:
         self.number: int = 0
 
     def process_bye(self) -> Optional[Athlete]:
-        """Processa automaticamente lutas com bye."""
+        """
+        Processa automaticamente lutas com bye (apenas um atleta).
+        
+        Returns:
+            Atleta vencedor por bye, ou None se ambos presentes
+        """
         if self.athlete1 and not self.athlete2:
             self.winner = self.athlete1
         elif self.athlete2 and not self.athlete1:
@@ -211,11 +148,19 @@ class Match:
 # ========================================================================
 
 class SeedingGenerator:
-    """Gerador de ordens de seeding."""
+    """Gerador de ordens de seeding para diferentes tamanhos de chave."""
     
     @staticmethod
     def generate_seeding_order(bracket_size: int) -> List[int]:
-        """Gera ordem de seeding padrão para eliminação simples."""
+        """
+        Gera ordem de seeding padrão para eliminação simples.
+        
+        Args:
+            bracket_size: Tamanho da chave (potência de 2)
+            
+        Returns:
+            Lista com ordem de posicionamento dos seeds
+        """
         seeding_orders = {
             1: [0],
             2: [0, 1],
@@ -241,6 +186,7 @@ class SeedingGenerator:
         if bracket_size in seeding_orders:
             return seeding_orders[bracket_size]
         
+        # Gera recursivamente para tamanhos não mapeados
         half_size = bracket_size // 2
         half_order = SeedingGenerator.generate_seeding_order(half_size)
         
@@ -252,11 +198,19 @@ class SeedingGenerator:
 
 
 class RoundNamer:
-    """Utilitário para nomear rodadas."""
+    """Utilitário para nomear rodadas do chaveamento."""
     
     @staticmethod
     def get_round_name(participants_count: int) -> str:
-        """Retorna nome da rodada baseado no número de participantes."""
+        """
+        Retorna nome da rodada baseado no número de participantes.
+        
+        Args:
+            participants_count: Número de participantes na rodada
+            
+        Returns:
+            Nome da rodada em português
+        """
         round_names = {
             2: "FINAL",
             4: "SEMIFINAIS", 
@@ -272,100 +226,352 @@ class RoundNamer:
 
 
 class TournamentBracket:
-    """Classe principal para geração de chaveamentos."""
+    """
+    Classe principal para geração e gerenciamento de chaveamentos.
+    
+    Attributes:
+        athletes: Lista de atletas no chaveamento
+        category: Nome da categoria
+        rounds: Lista de rodadas (cada rodada é uma lista de lutas)
+        round_names: Nomes das rodadas
+        medalists: Dicionário com medalhistas
+    """
     
     def __init__(self, athletes: List[Athlete], category: str):
         self.athletes = athletes
         self.category = category
-        self.bracket_size = self._calculate_bracket_size()
         self.rounds: List[List[Match]] = []
-        self._generate_bracket()
+        self.round_names: List[str] = []
+        self.medalists: Dict = {}
+        
+        if len(athletes) > 1:
+            self._build_bracket()
 
-    def _calculate_bracket_size(self) -> int:
-        """Calcula próxima potência de 2."""
-        return 2 ** math.ceil(math.log2(len(self.athletes)))
+    def _calculate_bracket_size(self) -> Tuple[int, int]:
+        """
+        Calcula tamanho da chave e número de byes necessários.
+        
+        Returns:
+            Tupla com (tamanho_da_chave, numero_de_byes)
+        """
+        num_athletes = len(self.athletes)
+        bracket_size = 2 ** math.ceil(math.log2(num_athletes))
+        num_byes = bracket_size - num_athletes
+        
+        return bracket_size, num_byes
 
-    def _generate_bracket(self) -> None:
-        """Gera estrutura completa do chaveamento."""
-        self._assign_seeds()
-        self._create_first_round()
-        self._create_subsequent_rounds()
-        self._number_matches()
+    def _reassign_seeds(self) -> None:
+        """Reatribui seeds de 1 a N mantendo ordem original."""
+        for new_seed, athlete in enumerate(self.athletes, start=1):
+            athlete.seed = new_seed
 
-    def _assign_seeds(self) -> None:
-        """Atribui seeds aos atletas evitando confrontos da mesma equipe."""
-        teams = {}
-        for athlete in self.athletes:
-            if athlete.team not in teams:
-                teams[athlete.team] = []
-            teams[athlete.team].append(athlete)
+    def _create_initial_bracket(self) -> List[Optional[Athlete]]:
+        """
+        Cria chave inicial com seeding otimizado e separação de equipes.
         
-        sorted_teams = sorted(teams.items(), key=lambda x: len(x[1]), reverse=True)
-        
-        seeded_athletes = []
-        team_indices = {team: 0 for team, _ in sorted_teams}
-        
-        while len(seeded_athletes) < len(self.athletes):
-            for team, athletes_list in sorted_teams:
-                if team_indices[team] < len(athletes_list):
-                    seeded_athletes.append(athletes_list[team_indices[team]])
-                    team_indices[team] += 1
-        
-        for idx, athlete in enumerate(seeded_athletes):
-            athlete.seed = idx + 1
+        Returns:
+            Lista representando a chave inicial
+        """
+        try:
+            bracket_size, num_byes = self._calculate_bracket_size()
+            sorted_athletes = sorted(self.athletes, key=lambda x: x.seed)
+            
+            # Cria pares de confronto otimizados
+            matchups = self._create_optimal_matchups(sorted_athletes, bracket_size)
+            
+            # Distribui considerando equipes
+            initial_bracket = self._distribute_with_team_separation(matchups, bracket_size)
+            
+            return initial_bracket
+        except Exception as e:
+            print(f"DEBUG: Erro na criação da chave: {e}")
+            return self._create_fallback_bracket()
 
-    def _create_first_round(self) -> None:
-        """Cria primeira rodada do chaveamento."""
-        seeding_order = SeedingGenerator.generate_seeding_order(self.bracket_size)
+    def _create_optimal_matchups(self, sorted_athletes: List[Athlete], bracket_size: int) -> List[Tuple[Optional[Athlete], Optional[Athlete]]]:
+        """Cria confrontos otimizados: #1vs#N, #2vs#N-1, etc."""
+        matchups = []
+        n = len(sorted_athletes)
         
-        positioned_athletes = [None] * self.bracket_size
-        for i, athlete in enumerate(self.athletes):
-            positioned_athletes[seeding_order[i]] = athlete
+        try:
+            for i in range(bracket_size // 2):
+                if i < n:
+                    top_seed = sorted_athletes[i]
+                    opponent_idx = n - 1 - i
+                    bottom_seed = sorted_athletes[opponent_idx] if opponent_idx > i else None
+                    matchups.append((top_seed, bottom_seed))
+                else:
+                    matchups.append((None, None))
+            
+            print(f"DEBUG: Criados {len(matchups)} confrontos para {n} atletas")
+            return matchups
+        except Exception as e:
+            print(f"DEBUG: Erro nos confrontos: {e}")
+            return [(None, None)] * (bracket_size // 2)
+
+    def _distribute_with_team_separation(self, matchups: List[Tuple[Optional[Athlete], Optional[Athlete]]], bracket_size: int) -> List[Optional[Athlete]]:
+        """Distribui confrontos separando equipes em quadrantes."""
+        bracket = [None] * bracket_size
         
+        try:
+            # Separa confrontos em metades da chave
+            mid_point = len(matchups) // 2
+            first_half = matchups[:mid_point]
+            second_half = matchups[mid_point:]
+            
+            # Ajusta por equipes se necessário
+            first_half, second_half = self._adjust_team_distribution(first_half, second_half)
+            
+            # Preenche bracket
+            pos = 0
+            for matchup in first_half + second_half:
+                bracket[pos] = matchup[0]
+                bracket[pos + 1] = matchup[1]
+                pos += 2
+            
+            return bracket
+        except Exception as e:
+            print(f"DEBUG: Erro na distribuição: {e}")
+            return self._create_fallback_bracket()
+
+    def _adjust_team_distribution(self, first_half: List[Tuple], second_half: List[Tuple]) -> Tuple[List[Tuple], List[Tuple]]:
+        """Ajusta distribuição para separar atletas da mesma equipe."""
+        try:
+            # Identifica equipes duplicadas entre metades
+            first_teams = set()
+            second_teams = set()
+            
+            for matchup in first_half:
+                for athlete in matchup:
+                    if athlete:
+                        first_teams.add(athlete.team)
+            
+            for matchup in second_half:
+                for athlete in matchup:
+                    if athlete:
+                        second_teams.add(athlete.team)
+            
+            conflicts = first_teams & second_teams
+            
+            if conflicts:
+                print(f"DEBUG: Conflitos de equipe detectados: {conflicts}")
+                # Troca confrontos com conflito para metades opostas
+                for i, matchup in enumerate(first_half):
+                    for athlete in matchup:
+                        if athlete and athlete.team in conflicts:
+                            # Procura posição na segunda metade para trocar
+                            for j, other_matchup in enumerate(second_half):
+                                if not any(a and a.team == athlete.team for a in other_matchup):
+                                    first_half[i], second_half[j] = second_half[j], first_half[i]
+                                    break
+                            break
+            
+            return first_half, second_half
+        except Exception as e:
+            print(f"DEBUG: Erro no ajuste de equipes: {e}")
+            return first_half, second_half
+
+    def _create_fallback_bracket(self) -> List[Optional[Athlete]]:
+        """Cria chave básica em caso de erro."""
+        bracket_size, _ = self._calculate_bracket_size()
+        sorted_athletes = sorted(self.athletes, key=lambda x: x.seed)
+        seeding_order = SeedingGenerator.generate_seeding_order(bracket_size)
+        
+        bracket = [None] * bracket_size
+        for i, athlete in enumerate(sorted_athletes):
+            if i < len(seeding_order):
+                bracket[seeding_order[i]] = athlete
+        
+        return bracket
+
+    def _create_first_round(self, initial_bracket: List[Optional[Athlete]]) -> List[Match]:
+        """
+        Cria primeira rodada baseada na chave inicial.
+        
+        Args:
+            initial_bracket: Chave inicial com atletas posicionados
+            
+        Returns:
+            Lista de lutas da primeira rodada
+        """
         first_round = []
-        for i in range(0, self.bracket_size, 2):
-            match = Match(positioned_athletes[i], positioned_athletes[i + 1])
-            match.process_bye()
+        match_number = 1
+        bracket_size = len(initial_bracket)
+        
+        for i in range(0, bracket_size, 2):
+            match = Match(initial_bracket[i], initial_bracket[i + 1])
+            
+            if match.has_both_athletes():
+                match.number = match_number
+                match_number += 1
+            elif match.athlete1 or match.athlete2:
+                match.process_bye()
+            
             first_round.append(match)
         
-        self.rounds.append(first_round)
+        return first_round
 
-    def _create_subsequent_rounds(self) -> None:
-        """Cria rodadas subsequentes."""
-        current_round = self.rounds[0]
+    def _create_subsequent_rounds(self, previous_round: List[Match]) -> None:
+        """
+        Cria rodadas subsequentes baseadas na rodada anterior.
+        
+        Args:
+            previous_round: Rodada anterior para avançar vencedores
+        """
+        match_number = sum(
+            1 for round_matches in self.rounds 
+            for match in round_matches 
+            if match.has_both_athletes()
+        ) + 1
+        
+        current_round = previous_round
         
         while len(current_round) > 1:
             next_round = []
+            
             for i in range(0, len(current_round), 2):
-                match = Match()
-                next_round.append(match)
-            self.rounds.append(next_round)
-            current_round = next_round
-
-    def _number_matches(self) -> None:
-        """Numera todas as lutas."""
-        match_number = 1
-        for round_matches in self.rounds:
-            for match in round_matches:
-                if match.has_both_athletes() or match.is_bye():
+                winner1 = current_round[i].winner if i < len(current_round) else None
+                winner2 = current_round[i + 1].winner if i + 1 < len(current_round) else None
+                
+                match = Match(winner1, winner2)
+                if winner1 and winner2:
                     match.number = match_number
                     match_number += 1
+                
+                next_round.append(match)
+            
+            self.rounds.append(next_round)
+            self.round_names.append(RoundNamer.get_round_name(len(next_round) * 2))
+            current_round = next_round
 
+    def _build_bracket(self) -> None:
+        """Constrói o chaveamento completo."""
+        self._reassign_seeds()
+        
+        # Cria chave inicial
+        initial_bracket = self._create_initial_bracket()
+        
+        # Cria primeira rodada
+        first_round = self._create_first_round(initial_bracket)
+        bracket_size, _ = self._calculate_bracket_size()
+        
+        self.rounds.append(first_round)
+        self.round_names.append(RoundNamer.get_round_name(bracket_size))
+        
+        # Cria rodadas subsequentes
+        self._create_subsequent_rounds(first_round)
+
+
+# ========================================================================
+# INTEGRAÇÃO COM GOOGLE SHEETS
+# ========================================================================
+
+class GoogleSheetsLoader:
+    """Classe para carregar dados do Google Sheets."""
+    
+    @staticmethod
+    def load_dataframe(sheet_url: str) -> pd.DataFrame:
+        """
+        Carrega dados do Google Sheets como DataFrame.
+        
+        Args:
+            sheet_url: URL do Google Sheets (pública)
+            
+        Returns:
+            DataFrame com dados carregados
+            
+        Raises:
+            Exception: Se houver erro no carregamento
+        """
+        try:
+            sheet_id = GoogleSheetsLoader._extract_sheet_id(sheet_url)
+            csv_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+            
+            response = requests.get(csv_url)
+            response.raise_for_status()
+            response.encoding = 'utf-8'
+            
+            csv_data = StringIO(response.text)
+            df = pd.read_csv(csv_data)
+            
+            return df
+            
+        except Exception as e:
+            raise Exception(f"Erro ao carregar planilha: {str(e)}")
+
+    @staticmethod
+    def _extract_sheet_id(sheet_url: str) -> str:
+        """Extrai ID da planilha da URL."""
+        if "/edit" in sheet_url:
+            return sheet_url.split("/d/")[1].split("/edit")[0]
+        return sheet_url
+
+
+class AthleteProcessor:
+    """Processador de dados de atletas."""
+    
+    @staticmethod
+    def process_dataframe(df: pd.DataFrame) -> List[Athlete]:
+        """
+        Processa DataFrame e converte em lista de atletas.
+        
+        Args:
+            df: DataFrame com dados dos atletas
+            
+        Returns:
+            Lista de objetos Athlete
+        """
+        athletes = []
+        
+        for i, row in df.iterrows():
+            if pd.notna(row.iloc[0]):
+                athlete = AthleteProcessor._create_athlete_from_row(row, i + 1)
+                athletes.append(athlete)
+        
+        return athletes
+
+    @staticmethod
+    def _create_athlete_from_row(row: pd.Series, seed: int) -> Athlete:
+        """Cria objeto Athlete a partir de linha do DataFrame."""
+        name = sanitize_text(str(row.iloc[0]))
+        age_category = sanitize_text(str(row.iloc[1]) if pd.notna(row.iloc[1]) else "")
+        weight_category = sanitize_text(str(row.iloc[2]) if pd.notna(row.iloc[2]) else "")
+        belt = sanitize_text(str(row.iloc[4]) if pd.notna(row.iloc[4]) else "")
+        gender = sanitize_text(str(row.iloc[5]) if pd.notna(row.iloc[5]) else "")
+        
+        if len(row) > 6 and pd.notna(row.iloc[6]):
+            team = sanitize_text(str(row.iloc[6]))
+        else:
+            team = "EQUIPE NÃO INFORMADA"
+        
+        return Athlete(
+            name=name,
+            team=team,
+            seed=seed,
+            age_category=age_category,
+            weight_category=weight_category,
+            belt=belt,
+            gender=gender
+        )
+
+
+# ========================================================================
+# FILTROS E SELEÇÃO
+# ========================================================================
 
 class AthleteFilter:
-    """Utilitários para filtrar atletas."""
+    """Classe para filtrar atletas por categorias."""
     
     @staticmethod
     def get_available_options(athletes: List[Athlete]) -> Dict[str, List[str]]:
-        """Retorna opções disponíveis de filtros."""
-        if not athletes:
-            return {
-                'genders': [],
-                'belts': [],
-                'age_categories': [],
-                'weight_categories': []
-            }
+        """
+        Retorna opções disponíveis para filtros.
         
+        Args:
+            athletes: Lista de atletas
+            
+        Returns:
+            Dicionário com opções disponíveis para cada filtro
+        """
         return {
             'genders': sorted(list(set(a.gender for a in athletes if a.gender))),
             'belts': sorted(list(set(a.belt for a in athletes if a.belt))),
@@ -394,381 +600,589 @@ class AthleteFilter:
         return [a for a in athletes if a.weight_category == weight_category]
 
 
-class AthleteProcessor:
-    """Processa DataFrame e converte para objetos Athlete."""
-    
-    @staticmethod
-    def process_dataframe(df: pd.DataFrame) -> List[Athlete]:
-        """Converte DataFrame em lista de objetos Athlete."""
-        athletes = []
-        
-        for _, row in df.iterrows():
-            athlete = Athlete(
-                name=str(row.get('Nome', '')),
-                team=str(row.get('Equipe', '')),
-                age_category=str(row.get('Categoria de Idade', '')),
-                weight_category=str(row.get('Categoria de Peso', '')),
-                belt=str(row.get('Faixa', '')),
-                gender=str(row.get('Gênero', ''))
-            )
-            athletes.append(athlete)
-        
-        return athletes
-
-
 # ========================================================================
-# RENDERIZAÇÃO DE CHAVES
+# INTERFACE DE USUÁRIO
 # ========================================================================
 
 class StyleManager:
-    """Gerenciador de estilos CSS."""
+    """Gerenciador de estilos CSS para a interface."""
     
     @staticmethod
     def apply_dark_theme() -> None:
-        """Aplica tema escuro para chaveamento."""
-        st.markdown("""
+        """Aplica tema escuro customizado."""
+        css = """
         <style>
-        .bracket-container {
-            display: flex;
-            overflow-x: auto;
-            padding: 20px;
-            background: #1e1e1e;
-            border-radius: 10px;
-            margin: 20px 0;
-        }
-        
-        .round {
-            display: flex;
-            flex-direction: column;
-            justify-content: space-around;
-            min-width: 250px;
-            margin: 0 10px;
-        }
-        
-        .round-title {
-            color: #ffa500;
-            font-weight: bold;
-            text-align: center;
-            margin-bottom: 20px;
-            font-size: 1.1em;
-            padding: 10px;
-            background: #2a2a2a;
-            border-radius: 5px;
-        }
-        
-        .match-container {
-            margin: 10px 0;
-            position: relative;
-        }
-        
-        .match {
-            background: #2a2a2a;
-            border: 2px solid #444;
-            border-radius: 8px;
-            padding: 5px;
-            min-height: 80px;
-        }
-        
-        .participant {
-            padding: 8px 12px;
-            margin: 2px 0;
-            background: #363636;
-            border-radius: 5px;
-            border-left: 3px solid #ffa500;
-        }
-        
-        .participant-name {
-            color: #fff;
-            font-weight: 500;
-            font-size: 0.95em;
-        }
-        
-        .participant-team {
-            color: #999;
-            font-size: 0.85em;
-            margin-top: 2px;
-        }
-        
-        .match-number {
-            color: #ffa500;
-            font-size: 0.8em;
-            font-weight: bold;
-            text-align: center;
-            margin-bottom: 5px;
-        }
-        
-        .bye {
-            color: #666;
-            font-style: italic;
-            text-align: center;
-            padding: 10px;
-        }
+            .stApp {
+                background: linear-gradient(135deg, #0f0f0f 0%, #1a1a1a 100%);
+            }
+            
+            .css-1d391kg {
+                background: linear-gradient(180deg, #1a1a1a 0%, #0f0f0f 100%);
+                border-right: 1px solid #333333;
+            }
+            
+            .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
+                color: #e0e0e0 !important;
+                text-shadow: 0 2px 4px rgba(0, 0, 0, 0.8);
+            }
+            
+            .css-1d391kg .stMarkdown h2 {
+                color: #f0f0f0 !important;
+            }
+            
+            .stAlert {
+                background: rgba(45, 45, 45, 0.8) !important;
+                border: 1px solid #444444 !important;
+                border-radius: 8px !important;
+            }
+            
+            div[data-testid="metric-container"] {
+                background: linear-gradient(145deg, #2a2a2a 0%, #1f1f1f 100%);
+                border: 1px solid #444444;
+                border-radius: 8px;
+                padding: 1rem;
+                box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+            }
+            
+            .stButton > button {
+                background: linear-gradient(145deg, #ff6b35 0%, #f7931e 100%) !important;
+                color: white !important;
+                border: none !important;
+                border-radius: 8px !important;
+                font-weight: 600 !important;
+                box-shadow: 0 4px 16px rgba(255, 107, 53, 0.3) !important;
+                transition: all 0.3s ease !important;
+            }
+            
+            .stButton > button:hover {
+                transform: translateY(-2px) !important;
+                box-shadow: 0 6px 20px rgba(255, 107, 53, 0.4) !important;
+            }
+            
+            hr {
+                border-color: #444444 !important;
+            }
         </style>
-        """, unsafe_allow_html=True)
+        """
+        st.markdown(css, unsafe_allow_html=True)
 
 
 class BracketRenderer:
-    """Renderizador de chaveamento."""
+    """Renderizador de chaveamentos em formato visual."""
     
     @staticmethod
     def render_bracket(bracket: TournamentBracket) -> None:
-        """Renderiza chaveamento completo em HTML."""
-        html_parts = ['<div class="bracket-container">']
+        """
+        Renderiza chaveamento com design responsivo.
         
-        for round_idx, round_matches in enumerate(bracket.rounds):
-            participants_in_round = len(round_matches) * 2
-            round_name = RoundNamer.get_round_name(participants_in_round)
+        Args:
+            bracket: Objeto TournamentBracket para renderizar
+        """
+        if not bracket.rounds:
+            return
+        
+        css = BracketRenderer._get_bracket_css()
+        html = BracketRenderer._generate_bracket_html(bracket)
+        
+        st.markdown(css, unsafe_allow_html=True)
+        st.markdown(html, unsafe_allow_html=True)
+
+    @staticmethod
+    def _get_bracket_css() -> str:
+        """Retorna CSS para estilização do bracket."""
+        return """
+        <style>
+            .bracket-wrapper {
+                background: transparent;
+                padding: 16px;
+                overflow-x: auto;
+                min-height: 400px;
+            }
             
-            html_parts.append('<div class="round">')
+            .bracket-container {
+                display: flex;
+                gap: 32px;
+                align-items: stretch;
+                min-width: max-content;
+                position: relative;
+            }
+            
+            .round-column {
+                display: flex;
+                flex-direction: column;
+                justify-content: space-around;
+                min-width: 180px;
+                position: relative;
+                z-index: 2;
+            }
+            
+            .round-title {
+                color: #e0e0e0;
+                font-size: 11px;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: 1px;
+                margin-bottom: 16px;
+                text-align: center;
+                padding: 8px 6px;
+                background: linear-gradient(135deg, #404040 0%, #333333 100%);
+                border-radius: 6px;
+                border: 1px solid #555555;
+                text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+            }
+            
+            .matches-container {
+                display: flex;
+                flex-direction: column;
+                justify-content: space-around;
+                flex: 1;
+                gap: 12px;
+            }
+            
+            .match-wrapper {
+                display: flex;
+                align-items: center;
+                flex: 1;
+                position: relative;
+            }
+            
+            .connector-horizontal {
+                position: absolute;
+                right: -16px;
+                width: 16px;
+                height: 2px;
+                background: #666666;
+                top: 50%;
+                transform: translateY(-1px);
+                z-index: 1;
+            }
+            
+            .connector-vertical-top {
+                position: absolute;
+                right: -16px;
+                width: 2px;
+                background: #666666;
+                height: calc(50% + 6px);
+                bottom: 50%;
+                z-index: 1;
+            }
+            
+            .connector-vertical-bottom {
+                position: absolute;
+                right: -16px;
+                width: 2px;
+                background: #666666;
+                height: calc(50% + 6px);
+                top: 50%;
+                z-index: 1;
+            }
+            
+            .connector-entry {
+                position: absolute;
+                left: -16px;
+                width: 16px;
+                height: 2px;
+                background: #666666;
+                top: 50%;
+                transform: translateY(-1px);
+                z-index: 1;
+            }
+            
+            .fight-card {
+                background: linear-gradient(145deg, #2a2a2a 0%, #1f1f1f 100%);
+                border: 1px solid #444444;
+                border-radius: 6px;
+                width: 100%;
+                overflow: hidden;
+                box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+                transition: all 0.3s ease;
+            }
+            
+            .fight-card:hover {
+                transform: translateY(-1px);
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+                border-color: #666666;
+            }
+            
+            .participant {
+                padding: 6px 10px;
+                font-size: 12px;
+                display: flex;
+                align-items: center;
+                min-height: 24px;
+                transition: all 0.2s ease;
+            }
+            
+            .participant-top {
+                border-bottom: 1px solid #444444;
+            }
+            
+            .participant-bottom {
+                background: transparent;
+            }
+            
+            .participant-info {
+                flex: 1;
+            }
+            
+            .participant-name {
+                color: #f0f0f0;
+                font-weight: 600;
+                line-height: 1.2;
+            }
+            
+            .participant-team {
+                color: #b0b0b0;
+                font-size: 10px;
+                margin-top: 1px;
+                opacity: 0.9;
+            }
+            
+            .seed {
+                color: #ff9500;
+                font-weight: 700;
+                font-size: 10px;
+                text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+            }
+            
+            .bye {
+                color: #666666;
+                text-align: center;
+                padding: 12px;
+                font-style: italic;
+                font-size: 11px;
+                background: linear-gradient(145deg, #1a1a1a 0%, #0f0f0f 100%);
+                border: 1px dashed #333333;
+            }
+            
+            .winner {
+                background: #2d4a2d !important;
+                border-color: #4caf50 !important;
+            }
+            
+            .winner .participant-name {
+                color: #81c784 !important;
+                font-weight: 700;
+            }
+            
+            .winner .participant-team {
+                color: #a5d6a7 !important;
+            }
+            
+            @media (max-width: 768px) {
+                .bracket-container {
+                    gap: 20px;
+                }
+                
+                .round-column {
+                    min-width: 160px;
+                }
+                
+                .participant {
+                    padding: 5px 8px;
+                    font-size: 11px;
+                }
+                
+                .round-title {
+                    font-size: 10px;
+                    padding: 6px 4px;
+                }
+            }
+        </style>
+        """
+
+    @staticmethod
+    def _generate_bracket_html(bracket: TournamentBracket) -> str:
+        """Gera HTML do bracket."""
+        html_parts = ['<div class="bracket-wrapper"><div class="bracket-container">']
+        
+        for round_idx, (round_matches, round_name) in enumerate(zip(bracket.rounds, bracket.round_names)):
+            html_parts.append('<div class="round-column">')
             html_parts.append(f'<div class="round-title">{round_name}</div>')
+            html_parts.append('<div class="matches-container">')
             
-            for match in round_matches:
-                html_parts.extend(BracketRenderer._render_match(match, round_idx == 0))
+            for match_idx, match in enumerate(round_matches):
+                html_parts.extend(BracketRenderer._generate_match_html(match, round_idx, match_idx, len(bracket.rounds)))
             
-            html_parts.append('</div>')
+            html_parts.append('</div></div>')
+        
+        html_parts.append('</div></div>')
+        return ''.join(html_parts)
+
+    @staticmethod
+    def _generate_match_html(match: Match, round_idx: int, match_idx: int, total_rounds: int) -> List[str]:
+        """Gera HTML para uma luta específica."""
+        html_parts = ['<div class="match-wrapper">']
+        html_parts.append('<div class="fight-card">')
+        
+        # Renderiza atletas
+        if not match.athlete1 and not match.athlete2:
+            # Luta vazia
+            html_parts.append('<div class="participant participant-top"><div class="participant-info">&nbsp;</div></div>')
+            html_parts.append('<div class="participant participant-bottom"><div class="participant-info">&nbsp;</div></div>')
+        else:
+            # Atleta 1
+            html_parts.extend(BracketRenderer._generate_athlete_html(match.athlete1, match, "top", round_idx == 0))
+            # Atleta 2  
+            html_parts.extend(BracketRenderer._generate_athlete_html(match.athlete2, match, "bottom", round_idx == 0))
         
         html_parts.append('</div>')
         
-        st.markdown(''.join(html_parts), unsafe_allow_html=True)
-
-    @staticmethod
-    def _render_match(match: Match, is_first_round: bool) -> List[str]:
-        """Renderiza uma única luta."""
-        html_parts = ['<div class="match-container"><div class="match">']
+        # Conectores
+        if round_idx > 0:
+            html_parts.append('<div class="connector-entry"></div>')
         
-        if match.number > 0:
-            html_parts.append(f'<div class="match-number">Luta #{match.number}</div>')
+        if round_idx < total_rounds - 1:
+            html_parts.append('<div class="connector-horizontal"></div>')
+            
+            if match_idx % 2 == 0:
+                html_parts.append('<div class="connector-vertical-bottom"></div>')
+            else:
+                html_parts.append('<div class="connector-vertical-top"></div>')
         
-        html_parts.extend(BracketRenderer._render_participant(match.athlete1, 1, is_first_round))
-        html_parts.extend(BracketRenderer._render_participant(match.athlete2, 2, is_first_round))
-        
-        html_parts.append('</div></div>')
+        html_parts.append('</div>')
         return html_parts
 
     @staticmethod
-    def _render_participant(athlete: Optional[Athlete], position: int, is_first_round: bool) -> List[str]:
-        """Renderiza um participante."""
+    def _generate_athlete_html(athlete: Optional[Athlete], match: Match, position: str, is_first_round: bool) -> List[str]:
+        """Gera HTML para um atleta."""
         html_parts = []
         
         if athlete:
-            html_parts.append(f'<div class="participant participant-{position}">')
-            html_parts.append(f'<div class="participant-name">{athlete.name}</div>')
+            winner_class = "winner" if match.winner == athlete else ""
+            seed_text = f' <span class="seed">#{athlete.seed}</span>'
+            
+            html_parts.append(f'<div class="participant participant-{position} {winner_class}">')
+            html_parts.append('<div class="participant-info">')
+            html_parts.append(f'<div class="participant-name">{athlete.name}{seed_text}</div>')
             html_parts.append(f'<div class="participant-team">{athlete.team}</div>')
-            html_parts.append('</div>')
+            html_parts.append('</div></div>')
         else:
             if is_first_round:
                 html_parts.append('<div class="bye">BYE</div>')
             else:
-                html_parts.append(f'<div class="participant participant-{position}">')
-                html_parts.append('<div class="participant-name">&nbsp;</div>')
-                html_parts.append('</div>')
+                html_parts.append(f'<div class="participant participant-{position}"><div class="participant-info">&nbsp;</div></div>')
         
         return html_parts
 
 
-# ========================================================================
-# DASHBOARD DE ANÁLISE
-# ========================================================================
-
-def render_dashboard(df: pd.DataFrame, title: str) -> None:
-    """Renderiza dashboard completo de análise."""
-    st.header(f"📊 Análise: {title}", divider='orange')
-
-    # KPIs
-    total_atletas = len(df)
-    total_equipes = df['Equipe'].nunique()
-    genero_counts = df['Gênero'].value_counts()
+class SidebarManager:
+    """Gerenciador da barra lateral da aplicação."""
     
-    kpi1, kpi2, kpi3 = st.columns(3)
-    kpi1.metric(label="Total de Atletas 👥", value=total_atletas)
-    kpi2.metric(label="Total de Equipes 🛡️", value=total_equipes)
-    kpi3.metric(label="Masculino / Feminino ♂️♀️", value=f"{genero_counts.get('MASCULINO', 0)} / {genero_counts.get('FEMININO', 0)}")
-
-    # Abas
-    tab1, tab2 = st.tabs(["📋 Tabela de Dados", "📊 Análise Gráfica"])
-
-    with tab1:
-        st.subheader(f"Tabela de Competidores - {title}")
-        st.dataframe(df, use_container_width=True)
-        csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Baixar dados como CSV", 
-            data=csv, 
-            file_name=f'inscritos_{title}.csv', 
-            mime='text/csv'
+    @staticmethod
+    def render_data_loading_section() -> Optional[str]:
+        """
+        Renderiza seção de carregamento de dados.
+        
+        Returns:
+            URL da planilha se fornecida, None caso contrário
+        """
+        st.header("Configurações")
+        
+        sheet_url = st.text_input(
+            "URL do Google Sheets:",
+            value="",
+            help="Cole a URL pública do Google Sheets"
         )
+        
+        if st.button("Carregar Dados", type="primary", use_container_width=True):
+            return sheet_url
+            
+        return None
 
-    with tab2:
-        # Prepara dados para gráficos
-        conditions = [
-            df['Categoria de Idade'].str.contains('MASTER'),
-            df['Categoria de Idade'].str.contains('ADULTO')
-        ]
-        choices = ['MASTERS', 'ADULTO']
-        df['Grupo Etário'] = np.select(conditions, choices, default='KIDS')
-        gender_colors = {'MASCULINO': '#1f77b4', 'FEMININO': '#e377c2'}
+    @staticmethod
+    def render_filter_section(athletes: List[Athlete]) -> Tuple[str, str, str, str]:
+        """
+        Renderiza seção de filtros de categoria.
+        
+        Args:
+            athletes: Lista de atletas para filtrar
+            
+        Returns:
+            Tupla com (gênero, faixa, categoria_idade, categoria_peso) selecionados
+        """
+        st.divider()
+        
+        options = AthleteFilter.get_available_options(athletes)
+        
+        # Seleção de gênero
+        selected_gender = st.selectbox(
+            "Gênero:", 
+            options['genders'] if options['genders'] else ["Nenhum"]
+        )
+        
+        # Filtrar por gênero e buscar faixas
+        gender_filtered = AthleteFilter.filter_by_gender(athletes, selected_gender)
+        gender_options = AthleteFilter.get_available_options(gender_filtered)
+        
+        # Seleção de faixa
+        selected_belt = st.selectbox(
+            "Faixa:", 
+            gender_options['belts'] if gender_options['belts'] else ["Nenhuma"]
+        )
+        
+        # Filtrar por faixa e buscar idades
+        belt_filtered = AthleteFilter.filter_by_belt(gender_filtered, selected_belt)
+        belt_options = AthleteFilter.get_available_options(belt_filtered)
+        
+        # Seleção de categoria de idade
+        selected_age = st.selectbox(
+            "Categoria de Idade:", 
+            belt_options['age_categories'] if belt_options['age_categories'] else ["Nenhuma"]
+        )
+        
+        # Filtrar por idade e buscar pesos
+        age_filtered = AthleteFilter.filter_by_age_category(belt_filtered, selected_age)
+        age_options = AthleteFilter.get_available_options(age_filtered)
+        
+        # Seleção de categoria de peso
+        selected_weight = st.selectbox(
+            "Categoria de Peso:", 
+            age_options['weight_categories'] if age_options['weight_categories'] else ["Nenhuma"]
+        )
+        
+        return selected_gender, selected_belt, selected_age, selected_weight
 
-        def create_bar_chart(data_frame, group_by_col, chart_title):
-            grouped_data = data_frame.groupby([group_by_col, 'Gênero']).size().reset_index(name='Contagem')
-            fig = px.bar(
-                grouped_data, 
-                x=group_by_col, 
-                y='Contagem', 
-                color='Gênero', 
-                title=chart_title,
-                labels={'Contagem': 'Número de Atletas', group_by_col: chart_title.split(' por ')[-1]},
-                color_discrete_map=gender_colors,
-                text_auto=True
-            )
-            fig.update_xaxes(categoryorder='total descending', tickangle=-45)
-            st.plotly_chart(fig, use_container_width=True)
-
-        # Gráficos
-        col1, col2 = st.columns(2)
-        with col1: 
-            create_bar_chart(df, 'Grupo Etário', 'Atletas por Grupo Etário')
-        with col2: 
-            create_bar_chart(df, 'Categoria de Idade', 'Atletas por Categoria de Idade')
+    @staticmethod
+    def render_generate_button(filtered_athletes: List[Athlete]) -> bool:
+        """
+        Renderiza botão de geração e informações dos atletas.
         
-        create_bar_chart(df, 'Faixa', 'Atletas por Faixa')
-        create_bar_chart(df, 'Categoria de Peso', 'Atletas por Categoria de Peso')
+        Args:
+            filtered_athletes: Lista de atletas filtrados
+            
+        Returns:
+            True se botão foi clicado, False caso contrário
+        """
+        st.info(f"Atletas encontrados: {len(filtered_athletes)}")
         
-        st.subheader("🏆 Análise de Equipes e Professores", divider='orange')
+        if len(filtered_athletes) >= 2:
+            return st.button("Gerar Chave", use_container_width=True)
+        elif len(filtered_athletes) == 1:
+            st.warning("Apenas 1 atleta encontrado")
+        else:
+            st.warning("Nenhum atleta encontrado com estes filtros")
         
-        def create_top10_chart(data_frame, group_by_col, chart_title):
-            top_10_list = data_frame[group_by_col].value_counts().nlargest(10).index
-            df_top10 = data_frame[data_frame[group_by_col].isin(top_10_list)]
-            create_bar_chart(df_top10, group_by_col, chart_title)
-        
-        col3, col4 = st.columns(2)
-        with col3: 
-            create_top10_chart(df, 'Equipe', 'Top 10 Equipes com Mais Atletas')
-        with col4: 
-            create_top10_chart(df, 'Professor', 'Top 10 Professores com Mais Atletas')
+        return False
 
 
 # ========================================================================
-# INTERFACE PRINCIPAL
+# APLICAÇÃO PRINCIPAL
+# ========================================================================
+
+class IBJJFApp:
+    """Classe principal da aplicação IBJJF."""
+    
+    def __init__(self):
+        configure_streamlit()
+        StyleManager.apply_dark_theme()
+
+    def run(self) -> None:
+        """Executa a aplicação principal."""
+        self._render_header()
+        
+        with st.sidebar:
+            self._handle_sidebar()
+        
+        self._render_main_content()
+
+    def _render_header(self) -> None:
+        """Renderiza cabeçalho da aplicação."""
+        st.title("Sistema de Chaves IBJJF")
+        st.markdown("**Geração automática por categorias**")
+
+    def _handle_sidebar(self) -> None:
+        """Gerencia interações da barra lateral."""
+        # Seção de carregamento de dados
+        sheet_url = SidebarManager.render_data_loading_section()
+        
+        if sheet_url:
+            self._load_data_from_sheets(sheet_url)
+        
+        # Seção de filtros (se dados carregados)
+        if 'athletes_data' in st.session_state:
+            self._handle_filter_section()
+
+    def _load_data_from_sheets(self, sheet_url: str) -> None:
+        """Carrega dados do Google Sheets."""
+        with st.spinner("Carregando dados..."):
+            try:
+                df = GoogleSheetsLoader.load_dataframe(sheet_url)
+                if not df.empty:
+                    st.session_state.athletes_dataframe = df
+                    st.session_state.athletes_data = AthleteProcessor.process_dataframe(df)
+                    st.success(f"{len(st.session_state.athletes_data)} atletas carregados!")
+            except Exception as e:
+                st.error(str(e))
+
+    def _handle_filter_section(self) -> None:
+        """Gerencia seção de filtros."""
+        athletes = st.session_state.athletes_data
+        
+        # Renderiza filtros
+        selected_gender, selected_belt, selected_age, selected_weight = \
+            SidebarManager.render_filter_section(athletes)
+        
+        # Aplica filtros
+        filtered_athletes = self._apply_filters(
+            athletes, selected_gender, selected_belt, selected_age, selected_weight
+        )
+        
+        # Renderiza botão de geração
+        if SidebarManager.render_generate_button(filtered_athletes):
+            self._generate_bracket(filtered_athletes, selected_gender, selected_belt, selected_age, selected_weight)
+
+    def _apply_filters(
+        self, 
+        athletes: List[Athlete], 
+        gender: str, 
+        belt: str, 
+        age: str, 
+        weight: str
+    ) -> List[Athlete]:
+        """Aplica todos os filtros sequencialmente."""
+        filtered = AthleteFilter.filter_by_gender(athletes, gender)
+        filtered = AthleteFilter.filter_by_belt(filtered, belt)
+        filtered = AthleteFilter.filter_by_age_category(filtered, age)
+        filtered = AthleteFilter.filter_by_weight_category(filtered, weight)
+        
+        return filtered
+
+    def _generate_bracket(
+        self, 
+        athletes: List[Athlete], 
+        gender: str, 
+        belt: str, 
+        age: str, 
+        weight: str
+    ) -> None:
+        """Gera chaveamento para os atletas filtrados."""
+        category_name = f"{age} / {gender} / {weight} / {belt}"
+        st.session_state.current_bracket = TournamentBracket(athletes, category_name)
+
+    def _render_main_content(self) -> None:
+        """Renderiza conteúdo principal."""
+        if 'current_bracket' in st.session_state:
+            bracket = st.session_state.current_bracket
+            
+            st.header(bracket.category)
+            st.markdown(f"**{len(bracket.athletes)} atletas**")
+            
+            st.divider()
+            st.subheader("Chaveamento")
+            BracketRenderer.render_bracket(bracket)
+        else:
+            st.info("Carregue os dados e selecione os filtros para gerar uma chave")
+
+
+# ========================================================================
+# PONTO DE ENTRADA
 # ========================================================================
 
 def main():
     """Função principal da aplicação."""
-    StyleManager.apply_dark_theme()
-    
-    st.title("🥋 Sistema Integrado IBJJF")
-    st.markdown("**Análise de Competidores + Geração de Chaves Automáticas**")
-    
-    # Sidebar
-    with st.sidebar:
-        st.header("⚙️ Configurações")
-        
-        # Seção de carregamento de dados
-        st.subheader("1️⃣ Carregar Dados")
-        url = st.text_input(
-            "URL da Checagem ProCompetidor:",
-            value="https://procompetidor.com.br/checagem/UNpYfAt1jAPYxUTcuhgD",
-            help="Cole a URL da página de checagem"
-        )
-        
-        if st.button("🔍 Extrair Dados", type="primary", use_container_width=True):
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            df, title = raspar_dados(url, progress_bar, status_text)
-            
-            status_text.empty()
-            progress_bar.empty()
-            
-            if not df.empty:
-                st.session_state.df = df
-                st.session_state.title = title
-                st.session_state.athletes_data = AthleteProcessor.process_dataframe(df)
-                st.success(f"✅ {len(df)} atletas carregados!")
-            else:
-                st.error("❌ Nenhum dado encontrado. Verifique a URL.")
-        
-        st.divider()
-        
-        # Seção de geração de chaves (apenas se dados carregados)
-        if 'athletes_data' in st.session_state:
-            st.subheader("2️⃣ Gerar Chave")
-            
-            athletes = st.session_state.athletes_data
-            options = AthleteFilter.get_available_options(athletes)
-            
-            # Filtros em cascata
-            selected_gender = st.selectbox(
-                "Gênero:", 
-                options['genders'] if options['genders'] else ["Nenhum"]
-            )
-            
-            gender_filtered = AthleteFilter.filter_by_gender(athletes, selected_gender)
-            gender_options = AthleteFilter.get_available_options(gender_filtered)
-            
-            selected_belt = st.selectbox(
-                "Faixa:", 
-                gender_options['belts'] if gender_options['belts'] else ["Nenhuma"]
-            )
-            
-            belt_filtered = AthleteFilter.filter_by_belt(gender_filtered, selected_belt)
-            belt_options = AthleteFilter.get_available_options(belt_filtered)
-            
-            selected_age = st.selectbox(
-                "Categoria de Idade:", 
-                belt_options['age_categories'] if belt_options['age_categories'] else ["Nenhuma"]
-            )
-            
-            age_filtered = AthleteFilter.filter_by_age_category(belt_filtered, selected_age)
-            age_options = AthleteFilter.get_available_options(age_filtered)
-            
-            selected_weight = st.selectbox(
-                "Categoria de Peso:", 
-                age_options['weight_categories'] if age_options['weight_categories'] else ["Nenhuma"]
-            )
-            
-            # Aplicar todos os filtros
-            filtered_athletes = AthleteFilter.filter_by_weight_category(age_filtered, selected_weight)
-            
-            st.info(f"Atletas encontrados: {len(filtered_athletes)}")
-            
-            if len(filtered_athletes) >= 2:
-                if st.button("🏆 Gerar Chaveamento", use_container_width=True):
-                    category_name = f"{selected_age} / {selected_gender} / {selected_weight} / {selected_belt}"
-                    st.session_state.current_bracket = TournamentBracket(filtered_athletes, category_name)
-                    st.session_state.show_bracket = True
-                    st.rerun()
-            elif len(filtered_athletes) == 1:
-                st.warning("⚠️ Apenas 1 atleta encontrado")
-            else:
-                st.warning("⚠️ Nenhum atleta encontrado com estes filtros")
-    
-    # Área principal
-    if 'df' in st.session_state:
-        # Seletor de visualização
-        view_mode = st.radio(
-            "Visualizar:",
-            ["📊 Dashboard de Análise", "🏆 Chaveamento"],
-            horizontal=True
-        )
-        
-        if view_mode == "📊 Dashboard de Análise":
-            st.session_state.show_bracket = False
-            render_dashboard(st.session_state.df, st.session_state.title)
-        
-        elif view_mode == "🏆 Chaveamento":
-            if 'current_bracket' in st.session_state and st.session_state.get('show_bracket', False):
-                bracket = st.session_state.current_bracket
-                
-                st.header(f"🥋 {bracket.category}", divider='orange')
-                st.markdown(f"**{len(bracket.athletes)} atletas no chaveamento**")
-                
-                st.divider()
-                st.subheader("Chaveamento Completo")
-                BracketRenderer.render_bracket(bracket)
-            else:
-                st.info("👈 Selecione os filtros na barra lateral e clique em 'Gerar Chaveamento'")
-    else:
-        st.info("👈 Insira a URL na barra lateral e clique em 'Extrair Dados' para começar")
+    app = IBJJFApp()
+    app.run()
 
 
 if __name__ == "__main__":
